@@ -1,0 +1,18 @@
+[package]
+name = "slanganalyser"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "slanganalyser"
+path = "src/main.rs"
+
+[dependencies]
+slang_syntax = { path = "../slang_syntax" }
+slang_project = { path = "../slang_project" }
+slang_hir = { path = "../slang_hir" }
+slang_fmt = { path = "../slang_fmt" }
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
