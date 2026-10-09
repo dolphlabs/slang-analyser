@@ -1,0 +1,65 @@
+{
+    "name": "slang-vscode",
+    "displayName": "slang",
+    "description": "Language support for slang (.sl): hover types, goto-definition, diagnostics, formatting, semantic highlighting.",
+    "version": "0.1.0",
+    "publisher": "dolphlabs",
+    "license": "MIT",
+    "engines": {
+        "vscode": "^1.85.0"
+    },
+    "categories": ["Programming Languages"],
+    "activationEvents": [
+        "onLanguage:slang"
+    ],
+    "main": "./client/extension.js",
+    "contributes": {
+        "languages": [
+            {
+                "id": "slang",
+                "aliases": ["slang"],
+                "extensions": [".sl"],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "slang",
+                "scopeName": "source.slang",
+                "path": "./syntaxes/sl.tmGrammar.json"
+            }
+        ],
+        "themes": [
+            {
+                "label": "slang Dark",
+                "uiTheme": "vs-dark",
+                "path": "./themes/slang-dark.json"
+            },
+            {
+                "label": "slang Light",
+                "uiTheme": "vs",
+                "path": "./themes/slang-light.json"
+            }
+        ],
+        "configuration": {
+            "type": "object",
+            "title": "slang",
+            "properties": {
+                "slang.serverPath": {
+                    "type": "string",
+                    "default": "slanganalyser",
+                    "description": "Path to the slanganalyser language server binary."
+                },
+                "slang.trace.server": {
+                    "type": "string",
+                    "enum": ["off", "messages", "verbose"],
+                    "default": "off",
+                    "description": "Trace LSP traffic for debugging."
+                }
+            }
+        }
+    },
+    "dependencies": {
+        "vscode-languageclient": "^9.0.1"
+    }
+}

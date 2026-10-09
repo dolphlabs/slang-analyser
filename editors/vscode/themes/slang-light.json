@@ -1,0 +1,77 @@
+{
+    "name": "slang Light",
+    "type": "light",
+    "colors": {
+        "editor.background": "#fafafa",
+        "editor.foreground": "#23272e",
+        "editor.lineHighlightBackground": "#eef1f4",
+        "editorLineNumber.foreground": "#9aa3ad",
+        "editorLineNumber.activeForeground": "#4b5563",
+        "editor.selectionBackground": "#bcd7f5",
+        "editorCursor.foreground": "#0b7285",
+        "editorWhitespace.foreground": "#d3d9de",
+        "editorIndentGuide.background1": "#e2e7eb",
+        "editorIndentGuide.activeBackground1": "#b9c4cd",
+        "editorWidget.background": "#ffffff",
+        "editorWidget.border": "#d3d9de",
+        "statusBar.background": "#eef1f4",
+        "statusBar.foreground": "#4b5563",
+        "tab.activeBackground": "#fafafa",
+        "tab.inactiveBackground": "#eef1f4",
+        "sideBar.background": "#f1f4f6",
+        "activityBar.background": "#f1f4f6",
+        "activityBar.foreground": "#0b7285"
+    },
+    "semanticHighlighting": true,
+    "semanticTokenColors": {
+        "keyword": "#8844b8",
+        "type": "#0b7285",
+        "function": "#1c5fd6",
+        "method": "#1c5fd6",
+        "variable": "#23272e",
+        "string": "#3d7a1f",
+        "number": "#b35300",
+        "comment": "#8a94a0",
+        "operator": "#0b7285",
+        "enumMember": "#8a6100"
+    },
+    "tokenColors": [
+        {
+            "scope": "comment.line.double-slash.slang",
+            "settings": { "foreground": "#8a94a0", "fontStyle": "italic" }
+        },
+        {
+            "scope": "string.quoted.double.slang, string.other.bytes.slang",
+            "settings": { "foreground": "#3d7a1f" }
+        },
+        {
+            "scope": "constant.character.escape.slang, meta.interpolation.slang",
+            "settings": { "foreground": "#0b7285" }
+        },
+        {
+            "scope": [
+                "constant.numeric.hex.slang",
+                "constant.numeric.binary.slang",
+                "constant.numeric.float.slang",
+                "constant.numeric.integer.slang"
+            ],
+            "settings": { "foreground": "#b35300" }
+        },
+        {
+            "scope": "keyword.control.slang",
+            "settings": { "foreground": "#8844b8" }
+        },
+        {
+            "scope": "constant.language.slang",
+            "settings": { "foreground": "#8a6100" }
+        },
+        {
+            "scope": "storage.type.slang",
+            "settings": { "foreground": "#0b7285" }
+        },
+        {
+            "scope": "keyword.operator.slang",
+            "settings": { "foreground": "#0b7285" }
+        }
+    ]
+}
