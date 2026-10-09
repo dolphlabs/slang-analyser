@@ -1,0 +1,7 @@
+[package]
+name = "slang_fmt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slang_syntax = { path = "../slang_syntax" }
