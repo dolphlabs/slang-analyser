@@ -129,6 +129,16 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
+      - name: Stamp version and license
+        # package.json carries 0.1.0 in-repo; the release version comes from
+        # the tag. Without this both registries republish 0.1.0 forever.
+        # Also stages the root LICENSE so the vsix includes it.
+        shell: bash
+        run: |
+          node -e "const fs=require('fs');const p='package.json';const j=JSON.parse(fs.readFileSync(p));j.version=process.env.TAG.replace(/^v/,'');fs.writeFileSync(p,JSON.stringify(j,null,4)+'\n')"
+          cp ../../LICENSE ./LICENSE
+        env:
+          TAG: ${{ github.ref_name }}
       - uses: actions/setup-node@v5
         with:
           node-version: 20
@@ -149,6 +159,14 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
+      - name: Stamp version and license
+        # Same as publish-marketplace: version comes from the tag.
+        shell: bash
+        run: |
+          node -e "const fs=require('fs');const p='package.json';const j=JSON.parse(fs.readFileSync(p));j.version=process.env.TAG.replace(/^v/,'');fs.writeFileSync(p,JSON.stringify(j,null,4)+'\n')"
+          cp ../../LICENSE ./LICENSE
+        env:
+          TAG: ${{ github.ref_name }}
       - uses: actions/setup-node@v5
         with:
           node-version: 20
