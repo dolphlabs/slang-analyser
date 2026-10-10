@@ -33,7 +33,7 @@ impl Backend {
             .read()
             .await
             .clone()
-            .or_else(|| file.parent().and_then(|d| slang_project::find_root(d)));
+            .or_else(|| file.parent().and_then(slang_project::find_root));
         if let Some(root) = root {
             match Db::load(&root) {
                 Ok(db) => {
