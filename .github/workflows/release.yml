@@ -24,7 +24,7 @@ jobs:
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             exe: slanganalyser
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             exe: slanganalyser
           - os: macos-14
@@ -35,7 +35,7 @@ jobs:
             exe: slanganalyser.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -48,12 +48,23 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       - name: Stage artifact
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.exe }} dist/
           (cd dist && shasum -a 256 ${{ matrix.exe }} > ${{ matrix.exe }}.sha256)
-      - uses: actions/upload-artifact@v4
+      - name: Stage artifact (Windows)
+        # Git Bash ships no `shasum`: hash with PowerShell instead, in the
+        # same `<hash>  <file>` shape the publish job's `awk` expects.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.exe }}" dist/
+          $h = (Get-FileHash "dist/${{ matrix.exe }}" -Algorithm SHA256).Hash.ToLower()
+          "$h  ${{ matrix.exe }}" | Out-File -Encoding ascii "dist/${{ matrix.exe }}.sha256"
+      - uses: actions/upload-artifact@v5
         with:
           name: slanganalyser-${{ matrix.target }}
           path: dist/
@@ -62,8 +73,8 @@ jobs:
     needs: [server]
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
       - name: Stage release assets
@@ -85,7 +96,7 @@ jobs:
           done
           (cd dist && shasum -a 256 slanganalyser-* > SHA256SUMS.txt)
           ls dist
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - name: Package extension
@@ -115,10 +126,10 @@ jobs:
       run:
         working-directory: editors/vscode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - run: npm install --no-audit --no-fund
@@ -135,10 +146,10 @@ jobs:
       run:
         working-directory: editors/vscode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - run: npm install --no-audit --no-fund
