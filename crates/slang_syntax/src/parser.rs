@@ -261,17 +261,13 @@ impl Parser {
             TokenKind::KwFn => self.parse_fn(pub_, false).map(Item::Fn),
             TokenKind::KwExtern => {
                 self.bump();
-                if self.expect(TokenKind::KwFn, "'fn'").is_none() {
-                    return None;
-                }
+                self.expect(TokenKind::KwFn, "'fn'")?;
                 self.parse_fn(pub_, true).map(Item::Fn)
             }
             TokenKind::KwStruct => self.parse_struct(pub_, false).map(Item::Struct),
             TokenKind::KwGc => {
                 self.bump();
-                if self.expect(TokenKind::KwStruct, "'struct'").is_none() {
-                    return None;
-                }
+                self.expect(TokenKind::KwStruct, "'struct'")?;
                 self.parse_struct(pub_, true).map(Item::Struct)
             }
             TokenKind::KwEnum => self.parse_enum(pub_).map(Item::Enum),
@@ -585,9 +581,7 @@ impl Parser {
         if self.at(TokenKind::LBracket) {
             let start = self.bump().span;
             let inner = self.parse_type()?;
-            if self.expect(TokenKind::RBracket, "']'").is_none() {
-                return None;
-            }
+            self.expect(TokenKind::RBracket, "']'")?;
             let end = self.peek().span;
             return Some(Type {
                 kind: TypeKind::Array(Box::new(inner)),
@@ -732,9 +726,7 @@ impl Parser {
 
     fn parse_block(&mut self) -> Option<Block> {
         let start = self.peek().span;
-        if self.expect(TokenKind::LBrace, "'{'").is_none() {
-            return None;
-        }
+        self.expect(TokenKind::LBrace, "'{'")?;
         let mut stmts = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
             match self.parse_stmt() {
@@ -840,9 +832,7 @@ impl Parser {
             self.bump();
             ty = Some(self.parse_type()?);
         }
-        if self.expect(TokenKind::Assign, "'='").is_none() {
-            return None;
-        }
+        self.expect(TokenKind::Assign, "'='")?;
         let init = self.parse_expr()?;
         let end = if self.at(TokenKind::Semi) {
             self.bump().span
@@ -1651,9 +1641,7 @@ impl Parser {
                     continue;
                 }
             };
-            if self.at(TokenKind::Colon) {
-                self.bump();
-            } else if self.at(TokenKind::Assign) {
+            if self.at(TokenKind::Colon) || self.at(TokenKind::Assign) {
                 self.bump();
             } else {
                 self.err_here("expected ':' in struct literal");
