@@ -66,15 +66,24 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Re-zip per target
+      - name: Stage release assets
+        # Raw binaries (no archive): the VSCode extension downloads its
+        # target's asset plus the matching `.sha256` (bare hex hash) and
+        # verifies before executing.
         shell: bash
         run: |
           mkdir -p dist
           for d in artifacts/slanganalyser-*/; do
             target=$(basename "$d" | sed 's/^slanganalyser-//')
-            (cd "$d" && zip "../../dist/slanganalyser-$target.zip" ./*)
+            if [ -f "$d/slanganalyser.exe" ]; then
+              cp "$d/slanganalyser.exe" "dist/slanganalyser-$target.exe"
+              awk '{print $1}' "$d/slanganalyser.exe.sha256" > "dist/slanganalyser-$target.exe.sha256"
+            else
+              cp "$d/slanganalyser" "dist/slanganalyser-$target"
+              awk '{print $1}' "$d/slanganalyser.sha256" > "dist/slanganalyser-$target.sha256"
+            fi
           done
-          (cd dist && shasum -a 256 slanganalyser-*.zip > SHA256SUMS.txt)
+          (cd dist && shasum -a 256 slanganalyser-* > SHA256SUMS.txt)
           ls dist
       - uses: actions/setup-node@v4
         with:
