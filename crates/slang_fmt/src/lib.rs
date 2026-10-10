@@ -68,11 +68,6 @@ impl Printer {
         }
     }
 
-    fn stmt_with_comments(&mut self, line: u32, emit: impl FnOnce(&mut Self)) {
-        self.drain_leading(line);
-        emit(self);
-        self.drain_trailing(line);
-    }
 }
 
 /// Format `.sl` source into canonical style.
