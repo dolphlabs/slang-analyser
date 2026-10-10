@@ -58,6 +58,15 @@ struct Lexer<'a> {
     src: &'a [u8],
     pos: usize,
     line: u32,
+    comments: Vec<Comment>,
+}
+
+/// A `//` line comment with its source position, kept for the formatter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub text: String,
+    pub offset: usize,
+    pub line: u32,
 }
 
 impl<'a> Lexer<'a> {
@@ -66,6 +75,7 @@ impl<'a> Lexer<'a> {
             src: src.as_bytes(),
             pos: 0,
             line: 1,
+            comments: Vec::new(),
         }
     }
 
@@ -90,9 +100,18 @@ impl<'a> Lexer<'a> {
             } else if c == b' ' || c == b'\t' || c == b'\r' {
                 self.pos += 1;
             } else if c == b'/' && self.peek(1) == b'/' {
+                let start = self.pos;
+                let line = self.line;
                 while self.peek(0) != 0 && self.peek(0) != b'\n' {
                     self.pos += 1;
                 }
+                let text =
+                    String::from_utf8_lossy(&self.src[start..self.pos]).to_string();
+                self.comments.push(Comment {
+                    text,
+                    offset: start,
+                    line,
+                });
             } else {
                 break;
             }
@@ -540,6 +559,11 @@ impl<'a> Lexer<'a> {
 /// Lex a full `.sl` source file, appending a trailing `Eof` token.
 /// Mirrors repeated `lexer_next` calls in `src/loader.c`.
 pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
+    lex_with_comments(src).map(|(toks, _)| toks)
+}
+
+/// Lex, also returning `//` comments in source order for the formatter.
+pub fn lex_with_comments(src: &str) -> Result<(Vec<Token>, Vec<Comment>), LexError> {
     if !src.is_ascii() {
         // slang sources are UTF-8 `str`, but the lexer operates byte-wise;
         // non-ASCII is only legal inside string literals and comments.
@@ -564,7 +588,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                         line: lx.line,
                     },
                 });
-                return Ok(out);
+                return Ok((out, lx.comments));
             }
         }
     }
