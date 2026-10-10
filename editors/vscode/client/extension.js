@@ -15,7 +15,7 @@ const vscode = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 
 const REPO = "dolphlabs/slang-analyser";
-const EXT_ID = "dolphlabs.slang-vscode";
+const EXT_ID = "dolphlabs.slang-analyser";
 
 let client = null;
 
