@@ -1,6 +1,6 @@
 {
     "name": "slang-analyser",
-    "displayName": "slang",
+    "displayName": "slang-analyser",
     "description": "Language support for slang (.sl): hover types, goto-definition, diagnostics, formatting, semantic highlighting.",
     "version": "0.1.0",
     "publisher": "dolphlabs",
