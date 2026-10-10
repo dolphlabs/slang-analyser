@@ -820,11 +820,6 @@ impl Parser {
         }
     }
 
-    fn parse_let_stmt(&mut self, start: Span, _top: bool) -> Option<Stmt> {
-        // `let` already consumed by caller in one path; here it is not.
-        self.parse_let_rest(start, false)
-    }
-
     fn parse_let_rest(&mut self, start: Span, _pub: bool) -> Option<Stmt> {
         let name = self.expect_ident()?;
         let mut ty = None;
