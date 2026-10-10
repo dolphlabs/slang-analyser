@@ -8,7 +8,7 @@
 //! scalars, `[T]`, `map[K]V`, `opt[T]`, `result[T, E]`, structs, and
 //! function signatures.
 
-use slang_syntax::{Block, Expr, ExprKind, File, Item, Stmt, Type, TypeKind, lex_with_comments, parse};
+use slang_syntax::{Block, Else, Expr, ExprKind, File, Item, Stmt, SwitchBody, Type, TypeKind, lex_with_comments, parse};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,7 @@ pub struct FileId(usize);
 
 #[derive(Debug, Clone)]
 struct FileData {
+    path: PathBuf,
     package: String,
     src: String,
     file: File,
@@ -43,6 +44,77 @@ pub struct StructSym {
     pub docs: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct InlayHint {
+    /// Byte offset where the hint renders (end of the binding name).
+    pub offset: usize,
+    pub label: String,
+}
+
+/// Only hint when inference produced something more useful than the
+/// initializer's own text (a bare identifier or opaque call/field).
+fn is_concrete_hint(label: &str, init: &Expr) -> bool {
+    match &init.kind {
+        ExprKind::Ident(n) => label != n,
+        ExprKind::Call { .. } | ExprKind::Field { .. } => false,
+        _ => true,
+    }
+}
+
+fn collect_hints(file: &File, body: &Block, out: &mut Vec<InlayHint>) {
+    for s in &body.stmts {
+        stmt_hints(file, s, out);
+    }
+}
+
+fn stmt_hints(file: &File, s: &Stmt, out: &mut Vec<InlayHint>) {
+    match s {
+        Stmt::Let { name, ty, init, span } if ty.is_none() => {
+            let label = infer_expr(file, init);
+            if is_concrete_hint(&label, init) {
+                out.push(InlayHint {
+                    offset: span.offset + 4 + name.len(),
+                    label: format!(": {label}"),
+                });
+            }
+        }
+        Stmt::If { then, else_, .. } => {
+            collect_hints(file, then, out);
+            if let Some(Else::Block(b)) = else_ {
+                collect_hints(file, b, out);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::ForRange { body, .. } | Stmt::ForIn { body, .. } | Stmt::Unsafe { body, .. } => {
+            collect_hints(file, body, out);
+        }
+        Stmt::GuardLet { body, .. } => collect_hints(file, body, out),
+        Stmt::IfLet { then, else_, .. } => {
+            collect_hints(file, then, out);
+            if let Some(b) = else_ {
+                collect_hints(file, b, out);
+            }
+        }
+        Stmt::Select { cases, default, .. } => {
+            for c in cases {
+                collect_hints(file, &c.body, out);
+            }
+            if let Some(d) = default {
+                collect_hints(file, d, out);
+            }
+        }
+        Stmt::Switch { cases, default, .. } => {
+            for c in cases {
+                if let SwitchBody::Block(b) = &c.body {
+                    collect_hints(file, b, out);
+                }
+            }
+            if let Some(d) = default {
+                collect_hints(file, d, out);
+            }
+        }
+        _ => {}
+    }
+}
 #[derive(Debug, Clone)]
 pub struct Location {
     pub file: PathBuf,
@@ -107,6 +179,7 @@ impl Db {
             }
             db.index_file_symbols(&file, &package, &path, &docs);
             db.files.push(FileData {
+                path: path.to_path_buf(),
                 package,
                 src,
                 file,
@@ -115,7 +188,69 @@ impl Db {
         Ok(db)
     }
 
-    /// Build a single-file DB for tests and untitled editors.
+    /// Replace an open file's buffer (unsaved editor contents) and
+    /// re-index the workspace. Returns diagnostics for the new buffer;
+    /// the old index is kept when the buffer does not lex at all.
+    pub fn update_file(&mut self, path: &Path, src: String) -> Vec<slang_syntax::ParseError> {
+        let (toks, _) = match lex_with_comments(&src) {
+            Ok(v) => v,
+            Err(e) => {
+                return vec![slang_syntax::ParseError {
+                    line: e.line,
+                    offset: e.offset,
+                    message: e.message,
+                }]
+            }
+        };
+        let (file, errors) = parse(toks);
+        match self.file_index.get(path) {
+            Some(id) => {
+                let fd = &mut self.files[id.0];
+                fd.src = src;
+                fd.file = file;
+            }
+            None => {
+                let package = package_of_path(path);
+                let fid = FileId(self.files.len());
+                self.file_index.insert(path.to_path_buf(), fid);
+                self.files.push(FileData {
+                    path: path.to_path_buf(),
+                    package,
+                    src,
+                    file,
+                });
+            }
+        }
+        self.rebuild();
+        errors
+    }
+
+    fn rebuild(&mut self) {
+        self.funcs.clear();
+        self.structs.clear();
+        self.methods.clear();
+        self.imports.clear();
+        let snapshot: Vec<(File, String, PathBuf, HashMap<u32, String>)> = self
+            .files
+            .iter()
+            .map(|fd| {
+                let docs = lex_with_comments(&fd.src)
+                    .map(|(_, comments)| attach_docs(&comments, &fd.file))
+                    .unwrap_or_default();
+                (fd.file.clone(), fd.package.clone(), fd.path.clone(), docs)
+            })
+            .collect();
+        for (file, package, path, docs) in &snapshot {
+            for item in &file.items {
+                if let Item::Import { path: ip, alias, .. } = item {
+                    let target = import_target(ip);
+                    let bind = alias.clone().unwrap_or_else(|| target.clone());
+                    self.imports.entry((package.clone(), bind)).or_insert(target);
+                }
+            }
+            self.index_file_symbols(file, package, path, docs);
+        }
+    }
     pub fn load_single(package: &str, path: &Path, src: &str) -> Result<Self, String> {
         let mut db = Db {
             files: Vec::new(),
@@ -135,6 +270,7 @@ impl Db {
         let fid = FileId(db.files.len());
         db.file_index.insert(path.to_path_buf(), fid);
         db.files.push(FileData {
+            path: path.to_path_buf(),
             package: package.to_string(),
             src: src.to_string(),
             file,
@@ -234,6 +370,47 @@ impl Db {
     /// Goto-definition at a byte offset.
     pub fn goto_def(&self, path: &Path, offset: usize) -> Option<Location> {
         self.hover(path, offset).map(|h| h.location)
+    }
+
+    /// Inlay hints: inferred types for `let` bindings without annotation.
+    /// Returns the byte offset where the hint renders plus its label.
+    pub fn inlay_hints(&self, path: &Path) -> Vec<InlayHint> {
+        let fd = match self.file(path) {
+            Some(fd) => fd,
+            None => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for item in &fd.file.items {
+            match item {
+                Item::Let { name, ty, init, span, .. } if ty.is_none() => {
+                    let label = infer_expr(&fd.file, init);
+                    if is_concrete_hint(&label, init) {
+                        out.push(InlayHint {
+                            offset: span.offset + 4 + name.len(),
+                            label: format!(": {label}"),
+                        });
+                    }
+                }
+                Item::Fn(f) => {
+                    if let Some(body) = &f.body {
+                        collect_hints(&fd.file, body, &mut out);
+                    }
+                }
+                Item::Impl(i) => {
+                    for m in &i.methods {
+                        if let Some(body) = &m.body {
+                            collect_hints(&fd.file, body, &mut out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for s in &fd.file.body {
+            stmt_hints(&fd.file, s, &mut out);
+        }
+        out.sort_by_key(|h| h.offset);
+        out
     }
 
     fn resolve(&self, package: &str, path: &Path, ident: &str, offset: usize) -> Option<Hover> {
@@ -352,6 +529,28 @@ fn package_of(root: &Path, file: &Path) -> String {
         dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "main".to_string())
     };
     let mut out: String = base.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    if out.starts_with(|c: char| c.is_ascii_digit()) {
+        out = format!("p_{out}");
+    }
+    out
+}
+
+/// Package name for a file added after load (e.g. a new untitled file):
+/// its parent directory's name under the same sanitization rule.
+fn package_of_path(file: &Path) -> String {
+    let base = file
+        .parent()
+        .and_then(|d| d.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "main".to_string());
+    sanitize_package(&base)
+}
+
+fn sanitize_package(base: &str) -> String {
+    let mut out: String = base
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
     if out.starts_with(|c: char| c.is_ascii_digit()) {
         out = format!("p_{out}");
     }
@@ -628,6 +827,30 @@ mod tests {
         assert!(h.ty.contains("fn add"));
         assert_eq!(h.docs, "Add two.");
         assert_eq!(h.location.line, 2);
+    }
+
+    #[test]
+    fn should_emit_inlay_hints_for_unannotated_lets() {
+        let src = "let n = 10;\nlet name: str = \"x\";\n";
+        let d = db(src);
+        let hints = d.inlay_hints(&PathBuf::from("main.sl"));
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].label, ": int");
+    }
+
+    #[test]
+    fn should_update_open_buffer() {
+        let src = "fn add(a: int) -> int {\n    return a;\n}\n";
+        let mut d = db(src);
+        let path = PathBuf::from("main.sl");
+        let diags = d.update_file(&path, "fn add(a: int) -> int {\n    return a;\n}\nlet x = add(1);\n".to_string());
+        assert!(diags.is_empty());
+        let off = "fn add(a: int) -> int {\n    return a;\n}\nlet x = add(1);\n"
+            .find("add(1)")
+            .unwrap()
+            + 1;
+        let h = d.hover(&path, off).unwrap();
+        assert!(h.ty.contains("fn add"));
     }
 
     #[test]
