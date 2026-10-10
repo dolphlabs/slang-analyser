@@ -107,7 +107,10 @@ jobs:
   publish-marketplace:
     needs: [publish-github]
     runs-on: ubuntu-22.04
-    if: ${{ secrets.VSCE_PAT != '' }}
+    # NOTE: `secrets` is not a valid context in a job-level `if`; the
+    # secret is exposed via `env` and the publish step gates on that.
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
     defaults:
       run:
         working-directory: editors/vscode
@@ -120,13 +123,14 @@ jobs:
           node-version: 20
       - run: npm install --no-audit --no-fund
       - run: npx --yes @vscode/vsce publish -p "$VSCE_PAT"
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        if: env.VSCE_PAT != ''
 
   publish-openvsx:
     needs: [publish-github]
     runs-on: ubuntu-22.04
-    if: ${{ secrets.OPEN_VSX_TOKEN != '' }}
+    # Same `secrets`-in-job-`if` restriction as above: gate the step.
+    env:
+      OPEN_VSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
     defaults:
       run:
         working-directory: editors/vscode
@@ -139,5 +143,4 @@ jobs:
           node-version: 20
       - run: npm install --no-audit --no-fund
       - run: npx --yes ovsx publish -p "$OPEN_VSX_TOKEN"
-        env:
-          OPEN_VSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
+        if: env.OPEN_VSX_TOKEN != ''
