@@ -28,10 +28,12 @@ impl Backend {
         if self.db.read().await.is_some() {
             return;
         }
-        let root = self.root.read().await.clone().or_else(|| {
-            file.parent()
-                .and_then(|d| slang_project::find_root(d))
-        });
+        let root = self
+            .root
+            .read()
+            .await
+            .clone()
+            .or_else(|| file.parent().and_then(|d| slang_project::find_root(d)));
         if let Some(root) = root {
             match Db::load(&root) {
                 Ok(db) => {
@@ -75,8 +77,14 @@ fn diagnostics(text: &str) -> Vec<Diagnostic> {
         let (line, ch) = offset_to_position(&starts, text, e.offset);
         out.push(Diagnostic {
             range: Range {
-                start: Position { line, character: ch },
-                end: Position { line, character: ch + 1 },
+                start: Position {
+                    line,
+                    character: ch,
+                },
+                end: Position {
+                    line,
+                    character: ch + 1,
+                },
             },
             severity: Some(DiagnosticSeverity::ERROR),
             source: Some("slanganalyser".to_string()),
@@ -99,8 +107,14 @@ fn lex_diagnostic(
     let line = line.saturating_sub(1).min(l);
     Diagnostic {
         range: Range {
-            start: Position { line, character: ch },
-            end: Position { line, character: ch + 1 },
+            start: Position {
+                line,
+                character: ch,
+            },
+            end: Position {
+                line,
+                character: ch + 1,
+            },
         },
         severity: Some(DiagnosticSeverity::ERROR),
         source: Some("slanganalyser".to_string()),
@@ -130,7 +144,10 @@ fn legend() -> SemanticTokensLegend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, params: InitializeParams) -> tower_lsp::jsonrpc::Result<InitializeResult> {
+    async fn initialize(
+        &self,
+        params: InitializeParams,
+    ) -> tower_lsp::jsonrpc::Result<InitializeResult> {
         if let Some(uri) = params.root_uri {
             if let Some(path) = uri_to_path(&uri) {
                 let root = slang_project::find_root(&path).unwrap_or(path);
@@ -215,7 +232,9 @@ impl LanguageServer for Backend {
             Some(t) => t.clone(),
             None => return Ok(None),
         };
-        let Some(path) = uri_to_path(&uri) else { return Ok(None) };
+        let Some(path) = uri_to_path(&uri) else {
+            return Ok(None);
+        };
         self.ensure_db(&path).await;
         let db_guard = self.db.read().await;
         // Without a project, fall back to a single-file database.
@@ -232,7 +251,9 @@ impl LanguageServer for Backend {
         };
         let starts = line_starts(&text);
         let offset = position_to_offset(&starts, &text, pos.line, pos.character);
-        let Some(h) = db_ref.hover(&path, offset) else { return Ok(None) };
+        let Some(h) = db_ref.hover(&path, offset) else {
+            return Ok(None);
+        };
         let mut value = format!("```slang\n{}\n```", h.ty);
         if !h.docs.is_empty() {
             value.push_str(&format!("\n\n{}", h.docs));
@@ -262,7 +283,9 @@ impl LanguageServer for Backend {
             Some(t) => t.clone(),
             None => return Ok(None),
         };
-        let Some(path) = uri_to_path(&uri) else { return Ok(None) };
+        let Some(path) = uri_to_path(&uri) else {
+            return Ok(None);
+        };
         self.ensure_db(&path).await;
         let db_guard = self.db.read().await;
         let owned;
@@ -278,7 +301,9 @@ impl LanguageServer for Backend {
         };
         let starts = line_starts(&text);
         let offset = position_to_offset(&starts, &text, pos.line, pos.character);
-        let Some(loc) = db_ref.goto_def(&path, offset) else { return Ok(None) };
+        let Some(loc) = db_ref.goto_def(&path, offset) else {
+            return Ok(None);
+        };
         let target: Url = match Url::from_file_path(&loc.file) {
             Ok(u) => u,
             Err(_) => return Ok(None),
@@ -315,21 +340,32 @@ impl LanguageServer for Backend {
         let end_char = text[starts[last as usize]..].encode_utf16().count() as u32;
         Ok(Some(vec![TextEdit {
             range: Range {
-                start: Position { line: 0, character: 0 },
-                end: Position { line: last, character: end_char },
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: last,
+                    character: end_char,
+                },
             },
             new_text: formatted,
         }]))
     }
 
-    async fn inlay_hint(&self, params: InlayHintParams) -> tower_lsp::jsonrpc::Result<Option<Vec<InlayHint>>> {
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri;
         let docs = self.docs.read().await;
         let text = match docs.get(&uri) {
             Some(t) => t.clone(),
             None => return Ok(None),
         };
-        let Some(path) = uri_to_path(&uri) else { return Ok(None) };
+        let Some(path) = uri_to_path(&uri) else {
+            return Ok(None);
+        };
         self.ensure_db(&path).await;
         let db_guard = self.db.read().await;
         let owned;

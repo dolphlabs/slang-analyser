@@ -6,8 +6,8 @@
 //! Formatting is idempotent: `format(format(x)) == format(x)`.
 
 use slang_syntax::{
-    Block, Else, EnumDecl, Expr, ExprKind, File, FnDecl, ImplDecl, Item, SelectCase, Stmt,
-    StructDecl, SwitchBody, SwitchCase, Type, TypeKind, lex_with_comments, parse,
+    lex_with_comments, parse, Block, Else, EnumDecl, Expr, ExprKind, File, FnDecl, ImplDecl, Item,
+    SelectCase, Stmt, StructDecl, SwitchBody, SwitchCase, Type, TypeKind,
 };
 
 #[derive(Debug, Clone)]
@@ -67,7 +67,6 @@ impl Printer {
             self.out.push_str(c.text.trim());
         }
     }
-
 }
 
 /// Format `.sl` source into canonical style.
@@ -76,8 +75,9 @@ pub fn format(src: &str) -> Result<String, FormatError> {
 }
 
 pub fn format_with(opt: &FormatOptions, src: &str) -> Result<String, FormatError> {
-    let (toks, comments) = lex_with_comments(src)
-        .map_err(|e| FormatError { message: e.to_string() })?;
+    let (toks, comments) = lex_with_comments(src).map_err(|e| FormatError {
+        message: e.to_string(),
+    })?;
     let (file, errors) = parse(toks);
     if let Some(first) = errors.first() {
         return Err(FormatError {
@@ -148,7 +148,13 @@ fn fmt_item(p: &mut Printer, item: &Item) {
         Item::Link { lib, .. } => {
             p.out.push_str(&format!("link \"{lib}\";"));
         }
-        Item::Let { pub_, name, ty, init, .. } => {
+        Item::Let {
+            pub_,
+            name,
+            ty,
+            init,
+            ..
+        } => {
             if *pub_ {
                 p.out.push_str("pub ");
             }
@@ -328,13 +334,17 @@ fn fmt_stmt_inline(p: &mut Printer, s: &Stmt) {
             fmt_expr(p, init, 0);
             p.out.push(';');
         }
-        Stmt::Assign { target, op, value, .. } => {
+        Stmt::Assign {
+            target, op, value, ..
+        } => {
             fmt_expr(p, target, 0);
             p.out.push_str(&format!(" {op} "));
             fmt_expr(p, value, 0);
             p.out.push(';');
         }
-        Stmt::If { cond, then, else_, .. } => {
+        Stmt::If {
+            cond, then, else_, ..
+        } => {
             p.out.push_str("if ");
             fmt_expr(p, cond, 0);
             p.out.push(' ');
@@ -357,7 +367,14 @@ fn fmt_stmt_inline(p: &mut Printer, s: &Stmt) {
             p.out.push(' ');
             fmt_block(p, body);
         }
-        Stmt::ForRange { name, start, end, inclusive, body, .. } => {
+        Stmt::ForRange {
+            name,
+            start,
+            end,
+            inclusive,
+            body,
+            ..
+        } => {
             p.out.push_str(&format!("for {name} in "));
             fmt_expr(p, start, 0);
             p.out.push_str(if *inclusive { "..=" } else { ".." });
@@ -365,7 +382,13 @@ fn fmt_stmt_inline(p: &mut Printer, s: &Stmt) {
             p.out.push(' ');
             fmt_block(p, body);
         }
-        Stmt::ForIn { name, name2, iter, body, .. } => {
+        Stmt::ForIn {
+            name,
+            name2,
+            iter,
+            body,
+            ..
+        } => {
             p.out.push_str(&format!("for {name}"));
             if let Some(n2) = name2 {
                 p.out.push_str(&format!(", {n2}"));
@@ -389,7 +412,14 @@ fn fmt_stmt_inline(p: &mut Printer, s: &Stmt) {
             fmt_expr(p, expr, 0);
             p.out.push(';');
         }
-        Stmt::GuardLet { name, expr, err_name, err_expr, body, .. } => {
+        Stmt::GuardLet {
+            name,
+            expr,
+            err_name,
+            err_expr,
+            body,
+            ..
+        } => {
             p.out.push_str(&format!("guard let {name} = "));
             fmt_expr(p, expr, 0);
             p.out.push_str(" else");
@@ -409,7 +439,15 @@ fn fmt_stmt_inline(p: &mut Printer, s: &Stmt) {
             fmt_expr(p, call, 0);
             p.out.push(';');
         }
-        Stmt::IfLet { name, expr, then, err_name, err_expr, else_, .. } => {
+        Stmt::IfLet {
+            name,
+            expr,
+            then,
+            err_name,
+            err_expr,
+            else_,
+            ..
+        } => {
             p.out.push_str(&format!("if let {name} = "));
             fmt_expr(p, expr, 0);
             p.out.push(' ');
@@ -446,7 +484,12 @@ fn fmt_stmt_inline(p: &mut Printer, s: &Stmt) {
             p.pad();
             p.out.push('}');
         }
-        Stmt::Switch { scrut, cases, default, .. } => {
+        Stmt::Switch {
+            scrut,
+            cases,
+            default,
+            ..
+        } => {
             p.out.push_str("switch ");
             fmt_expr(p, scrut, 0);
             p.out.push_str(" {\n");
@@ -661,7 +704,12 @@ fn fmt_expr(p: &mut Printer, e: &Expr, parent_prec: u8) {
             fmt_expr(p, index, 0);
             p.out.push(']');
         }
-        ExprKind::Slice { base, start, end, inclusive } => {
+        ExprKind::Slice {
+            base,
+            start,
+            end,
+            inclusive,
+        } => {
             fmt_expr(p, base, 14);
             p.out.push('[');
             if let Some(s) = start {
@@ -730,7 +778,11 @@ fn fmt_expr(p: &mut Printer, e: &Expr, parent_prec: u8) {
             p.out.push_str("spawn ");
             fmt_expr(p, call, 0);
         }
-        ExprKind::Switch { scrut, cases, default } => {
+        ExprKind::Switch {
+            scrut,
+            cases,
+            default,
+        } => {
             p.out.push_str("switch ");
             fmt_expr(p, scrut, 0);
             p.out.push_str(" { ");

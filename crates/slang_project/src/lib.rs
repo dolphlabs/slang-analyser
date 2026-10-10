@@ -90,10 +90,12 @@ pub fn parse_project(src: &str) -> Result<SlProject, ProjectError> {
             continue;
         }
         let mut words = line.split_whitespace();
-        let fail = || ProjectError {
+        let fail = || {
+            ProjectError {
             line: line_no,
             message: "expected 'name <ident>' | 'version <value>' | 'pkg <name> git <url> tag <tag> [dir <subdir>]'"
                 .to_string(),
+        }
         };
         match words.next().ok_or_else(fail)? {
             "name" => {
@@ -143,7 +145,9 @@ pub fn parse_project(src: &str) -> Result<SlProject, ProjectError> {
                     if e.git != git || e.tag != tag || e.dir != dir {
                         return Err(ProjectError {
                             line: line_no,
-                            message: format!("package '{name}' needed twice with different sources"),
+                            message: format!(
+                                "package '{name}' needed twice with different sources"
+                            ),
                         });
                     }
                 } else {

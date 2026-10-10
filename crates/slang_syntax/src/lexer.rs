@@ -1,4 +1,4 @@
-use crate::token::{TokenKind, keyword_kind};
+use crate::token::{keyword_kind, TokenKind};
 
 /// Byte-offset span plus 1-based line, mirroring `Token.line` in C.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -105,8 +105,7 @@ impl<'a> Lexer<'a> {
                 while self.peek(0) != 0 && self.peek(0) != b'\n' {
                     self.pos += 1;
                 }
-                let text =
-                    String::from_utf8_lossy(&self.src[start..self.pos]).to_string();
+                let text = String::from_utf8_lossy(&self.src[start..self.pos]).to_string();
                 self.comments.push(Comment {
                     text,
                     offset: start,
@@ -295,13 +294,12 @@ impl<'a> Lexer<'a> {
             .map(|&c| c as char)
             .collect();
         if digits.len() > 20 {
-            return Err(self.err(
-                "integer literal does not fit in 64 bits (maximum is 18446744073709551615)",
-            ));
+            return Err(self
+                .err("integer literal does not fit in 64 bits (maximum is 18446744073709551615)"));
         }
-        let uv: u64 = digits
-            .parse()
-            .map_err(|_| self.err("integer literal does not fit in 64 bits (maximum is 18446744073709551615)"))?;
+        let uv: u64 = digits.parse().map_err(|_| {
+            self.err("integer literal does not fit in 64 bits (maximum is 18446744073709551615)")
+        })?;
         Ok(Token {
             kind: TokenKind::Int,
             text: None,
@@ -338,18 +336,16 @@ impl<'a> Lexer<'a> {
                     b'"' => buf.push(b'"'),
                     b'\\' => buf.push(b'\\'),
                     b'x' => {
-                        let hi = hex_val(self.peek(1))
-                            .ok_or_else(|| self.err("invalid \\xHH escape in byte string literal"))?;
-                        let lo = hex_val(self.peek(2))
-                            .ok_or_else(|| self.err("invalid \\xHH escape in byte string literal"))?;
+                        let hi = hex_val(self.peek(1)).ok_or_else(|| {
+                            self.err("invalid \\xHH escape in byte string literal")
+                        })?;
+                        let lo = hex_val(self.peek(2)).ok_or_else(|| {
+                            self.err("invalid \\xHH escape in byte string literal")
+                        })?;
                         buf.push(hi * 16 + lo);
                         self.pos += 2;
                     }
-                    _ => {
-                        return Err(self.err(
-                            "unknown escape sequence in byte string literal",
-                        ))
-                    }
+                    _ => return Err(self.err("unknown escape sequence in byte string literal")),
                 }
                 self.pos += 1;
             } else {

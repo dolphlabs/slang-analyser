@@ -52,5 +52,8 @@ fn should_recover_from_broken_code() {
     let (file, errors) = parse(toks);
     assert!(!errors.is_empty());
     // Recovery still finds the second function.
-    assert!(file.items.iter().any(|i| matches!(i, slang_syntax::Item::Fn(f) if f.name == "ok")));
+    assert!(file
+        .items
+        .iter()
+        .any(|i| matches!(i, slang_syntax::Item::Fn(f) if f.name == "ok")));
 }
