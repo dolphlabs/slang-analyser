@@ -1,0 +1,8 @@
+[package]
+name = "slang_hir"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slang_syntax = { path = "../slang_syntax" }
+slang_project = { path = "../slang_project" }

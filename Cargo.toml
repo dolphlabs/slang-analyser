@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/slang_syntax", "crates/slang_project", "crates/slang_fmt"]
+members = ["crates/slang_syntax", "crates/slang_project", "crates/slang_fmt", "crates/slang_hir"]
 resolver = "2"
 
 [workspace.package]
