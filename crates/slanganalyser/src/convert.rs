@@ -58,7 +58,10 @@ pub fn token_class(kind: TokenKind, text: Option<&str>, prev_is_dot: bool) -> Op
             if prev_is_dot {
                 return Some(8);
             }
-            if text.map(|t| t.starts_with(|c: char| c.is_ascii_uppercase())).unwrap_or(false) {
+            if text
+                .map(|t| t.starts_with(|c: char| c.is_ascii_uppercase()))
+                .unwrap_or(false)
+            {
                 return Some(9);
             }
             Some(3)
@@ -100,13 +103,26 @@ pub fn encode_semantic(
         if length == 0 {
             continue;
         }
-        out.push(SemTok { line, start, length, kind });
+        out.push(SemTok {
+            line,
+            start,
+            length,
+            kind,
+        });
     }
     for c in comments {
         let (line, start) = offset_to_position(&starts, src, c.offset);
-        let end = src[c.offset..].find('\n').map(|i| c.offset + i).unwrap_or(src.len());
+        let end = src[c.offset..]
+            .find('\n')
+            .map(|i| c.offset + i)
+            .unwrap_or(src.len());
         let length = (end - c.offset) as u32;
-        out.push(SemTok { line, start, length, kind: 6 });
+        out.push(SemTok {
+            line,
+            start,
+            length,
+            kind: 6,
+        });
     }
     out.sort_by_key(|t| (t.line, t.start));
     out

@@ -1,4 +1,4 @@
-use slang_syntax::{TokenKind, lex};
+use slang_syntax::{lex, TokenKind};
 
 #[test]
 fn should_lex_hello_program() {

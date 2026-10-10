@@ -51,7 +51,10 @@ impl Parser {
     }
 
     fn peek2_kind(&self) -> TokenKind {
-        self.toks.get(self.pos + 1).map(|t| t.kind).unwrap_or(TokenKind::Eof)
+        self.toks
+            .get(self.pos + 1)
+            .map(|t| t.kind)
+            .unwrap_or(TokenKind::Eof)
     }
 
     fn at(&self, k: TokenKind) -> bool {
@@ -160,7 +163,12 @@ impl Parser {
                 // Top-level `let` is a package global / main local.
                 let s = self.bump().span; // let
                 match self.parse_let_rest(s, false)? {
-                    Stmt::Let { name, ty, init, span } => Some(Top::Item(Item::Let {
+                    Stmt::Let {
+                        name,
+                        ty,
+                        init,
+                        span,
+                    } => Some(Top::Item(Item::Let {
                         pub_: false,
                         name,
                         ty,
@@ -271,7 +279,12 @@ impl Parser {
             TokenKind::KwLet => {
                 let s = self.bump().span;
                 match self.parse_let_rest(s, pub_)? {
-                    Stmt::Let { name, ty, init, span } => Some(Item::Let {
+                    Stmt::Let {
+                        name,
+                        ty,
+                        init,
+                        span,
+                    } => Some(Item::Let {
                         pub_,
                         name,
                         ty,
@@ -846,7 +859,7 @@ impl Parser {
 
     fn parse_guard(&mut self, start: Span) -> Option<Stmt> {
         self.bump(); // guard
-        // `guard cond else { }` or `guard let x = e [else let e2 = ...] { }`.
+                     // `guard cond else { }` or `guard let x = e [else let e2 = ...] { }`.
         if self.at(TokenKind::KwLet) {
             self.bump();
             let name = self.expect_ident()?;
@@ -892,7 +905,7 @@ impl Parser {
 
     fn parse_if(&mut self, start: Span) -> Option<Stmt> {
         self.bump(); // if
-        // `if let x = e { } [else ...]`
+                     // `if let x = e { } [else ...]`
         if self.at(TokenKind::KwLet) {
             self.bump();
             let name = self.expect_ident()?;
@@ -1035,7 +1048,11 @@ impl Parser {
                 // A send arm parses as a call; keep channel + value split
                 // best-effort: `chan_send(ch, v)` -> ch=ch, val=v.
                 let (ch_e, val) = match &ch.kind {
-                    ExprKind::Call { name: Some(n), args, .. } if n.ends_with("chan_send") && args.len() == 2 => {
+                    ExprKind::Call {
+                        name: Some(n),
+                        args,
+                        ..
+                    } if n.ends_with("chan_send") && args.len() == 2 => {
                         (args[0].clone(), Some(args[1].clone()))
                     }
                     _ => (ch, None),
@@ -1344,11 +1361,7 @@ impl Parser {
                         } else {
                             Expr {
                                 span,
-                                kind: ExprKind::MethodCall {
-                                    recv,
-                                    name,
-                                    args,
-                                },
+                                kind: ExprKind::MethodCall { recv, name, args },
                             }
                         }
                     }
@@ -1588,9 +1601,8 @@ impl Parser {
             return true;
         }
         // Field names may be keywords (`x.map:`), so accept those too.
-        let is_name = after.kind == TokenKind::Ident
-            || after.kind.is_keyword()
-            || after.kind.is_type_name();
+        let is_name =
+            after.kind == TokenKind::Ident || after.kind.is_keyword() || after.kind.is_type_name();
         if !is_name {
             return false;
         }
@@ -1721,7 +1733,10 @@ impl Parser {
                     if let Stmt::Expr { expr, .. } = b.stmts.into_iter().next().unwrap() {
                         SwitchBody::Expr(expr)
                     } else {
-                        SwitchBody::Block(Block { stmts: vec![], span: b.span })
+                        SwitchBody::Block(Block {
+                            stmts: vec![],
+                            span: b.span,
+                        })
                     }
                 } else {
                     SwitchBody::Block(b)
@@ -1730,7 +1745,11 @@ impl Parser {
                 SwitchBody::Expr(self.parse_expr()?)
             };
             let span = span_between(cstart, switch_body_span(&arm));
-            cases.push(SwitchCase { vals, body: arm, span });
+            cases.push(SwitchCase {
+                vals,
+                body: arm,
+                span,
+            });
         }
         let end = self.bump().span;
         Some(Expr {
@@ -1811,11 +1830,9 @@ fn type_to_string(t: &Type) -> String {
             format!("map[{}]{}", type_to_string(key), type_to_string(val))
         }
         TypeKind::Opt(i) => format!("opt[{}]", type_to_string(i)),
-        TypeKind::Result { ok, err } => format!(
-            "result[{}, {}]",
-            type_to_string(ok),
-            type_to_string(err)
-        ),
+        TypeKind::Result { ok, err } => {
+            format!("result[{}, {}]", type_to_string(ok), type_to_string(err))
+        }
         TypeKind::Chan(i) => format!("chan[{}]", type_to_string(i)),
         TypeKind::Join(i) => format!("join[{}]", type_to_string(i)),
         TypeKind::Ref(i) => format!("&{}", type_to_string(i)),
@@ -1824,7 +1841,11 @@ fn type_to_string(t: &Type) -> String {
         TypeKind::Gc(i) => format!("gc {}", type_to_string(i)),
         TypeKind::Ptr(i) => format!("*{}", type_to_string(i)),
         TypeKind::Fn { params, ret } => {
-            let ps = params.iter().map(type_to_string).collect::<Vec<_>>().join(", ");
+            let ps = params
+                .iter()
+                .map(type_to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             match ret {
                 Some(r) => format!("fn({ps}) -> {}", type_to_string(r)),
                 None => format!("fn({ps})"),

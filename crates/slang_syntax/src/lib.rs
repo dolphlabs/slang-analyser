@@ -4,6 +4,6 @@ mod parser;
 mod token;
 
 pub use ast::*;
-pub use lexer::{Comment, LexError, Span, Token, lex, lex_with_comments};
-pub use parser::{ParseError, parse};
+pub use lexer::{lex, lex_with_comments, Comment, LexError, Span, Token};
+pub use parser::{parse, ParseError};
 pub use token::TokenKind;

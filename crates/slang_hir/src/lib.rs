@@ -8,7 +8,10 @@
 //! scalars, `[T]`, `map[K]V`, `opt[T]`, `result[T, E]`, structs, and
 //! function signatures.
 
-use slang_syntax::{Block, Else, Expr, ExprKind, File, Item, Stmt, SwitchBody, Type, TypeKind, lex_with_comments, parse};
+use slang_syntax::{
+    lex_with_comments, parse, Block, Else, Expr, ExprKind, File, Item, Stmt, SwitchBody, Type,
+    TypeKind,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -69,7 +72,12 @@ fn collect_hints(file: &File, body: &Block, out: &mut Vec<InlayHint>) {
 
 fn stmt_hints(file: &File, s: &Stmt, out: &mut Vec<InlayHint>) {
     match s {
-        Stmt::Let { name, ty, init, span } if ty.is_none() => {
+        Stmt::Let {
+            name,
+            ty,
+            init,
+            span,
+        } if ty.is_none() => {
             let label = infer_expr(file, init);
             if is_concrete_hint(&label, init) {
                 out.push(InlayHint {
@@ -84,7 +92,10 @@ fn stmt_hints(file: &File, s: &Stmt, out: &mut Vec<InlayHint>) {
                 collect_hints(file, b, out);
             }
         }
-        Stmt::While { body, .. } | Stmt::ForRange { body, .. } | Stmt::ForIn { body, .. } | Stmt::Unsafe { body, .. } => {
+        Stmt::While { body, .. }
+        | Stmt::ForRange { body, .. }
+        | Stmt::ForIn { body, .. }
+        | Stmt::Unsafe { body, .. } => {
             collect_hints(file, body, out);
         }
         Stmt::GuardLet { body, .. } => collect_hints(file, body, out),
@@ -171,7 +182,10 @@ impl Db {
             db.file_index.insert(path.clone(), fid);
             // Record imports before indexing symbols so aliases resolve.
             for item in &file.items {
-                if let Item::Import { path: ip, alias, .. } = item {
+                if let Item::Import {
+                    path: ip, alias, ..
+                } = item
+                {
                     let target = import_target(ip);
                     let bind = alias.clone().unwrap_or_else(|| target.clone());
                     db.imports.entry((package.clone(), bind)).or_insert(target);
@@ -242,10 +256,15 @@ impl Db {
             .collect();
         for (file, package, path, docs) in &snapshot {
             for item in &file.items {
-                if let Item::Import { path: ip, alias, .. } = item {
+                if let Item::Import {
+                    path: ip, alias, ..
+                } = item
+                {
                     let target = import_target(ip);
                     let bind = alias.clone().unwrap_or_else(|| target.clone());
-                    self.imports.entry((package.clone(), bind)).or_insert(target);
+                    self.imports
+                        .entry((package.clone(), bind))
+                        .or_insert(target);
                 }
             }
             self.index_file_symbols(file, package, path, docs);
@@ -293,11 +312,17 @@ impl Db {
                         name: f.name.clone(),
                         file: path.to_path_buf(),
                         line: f.span.line,
-                        params: f.params.iter().map(|p| (p.name.clone(), type_string(&p.ty))).collect(),
+                        params: f
+                            .params
+                            .iter()
+                            .map(|p| (p.name.clone(), type_string(&p.ty)))
+                            .collect(),
                         ret: f.ret.as_ref().map(type_string),
                         docs: docs.get(&f.span.line).cloned().unwrap_or_default(),
                     };
-                    self.funcs.entry((package.to_string(), f.name.clone())).or_insert(sym);
+                    self.funcs
+                        .entry((package.to_string(), f.name.clone()))
+                        .or_insert(sym);
                 }
                 Item::Struct(s) => {
                     let sym = StructSym {
@@ -305,10 +330,16 @@ impl Db {
                         name: s.name.clone(),
                         file: path.to_path_buf(),
                         line: s.span.line,
-                        fields: s.fields.iter().map(|f| (f.name.clone(), type_string(&f.ty))).collect(),
+                        fields: s
+                            .fields
+                            .iter()
+                            .map(|f| (f.name.clone(), type_string(&f.ty)))
+                            .collect(),
                         docs: docs.get(&s.span.line).cloned().unwrap_or_default(),
                     };
-                    self.structs.entry((package.to_string(), s.name.clone())).or_insert(sym);
+                    self.structs
+                        .entry((package.to_string(), s.name.clone()))
+                        .or_insert(sym);
                 }
                 Item::Enum(e) => {
                     // Enums resolve as named types for hover; variants are
@@ -318,10 +349,16 @@ impl Db {
                         name: e.name.clone(),
                         file: path.to_path_buf(),
                         line: e.span.line,
-                        fields: e.variants.iter().map(|v| (v.name.clone(), String::new())).collect(),
+                        fields: e
+                            .variants
+                            .iter()
+                            .map(|v| (v.name.clone(), String::new()))
+                            .collect(),
                         docs: docs.get(&e.span.line).cloned().unwrap_or_default(),
                     };
-                    self.structs.entry((package.to_string(), e.name.clone())).or_insert(sym);
+                    self.structs
+                        .entry((package.to_string(), e.name.clone()))
+                        .or_insert(sym);
                 }
                 Item::Impl(i) => {
                     for m in &i.methods {
@@ -330,7 +367,11 @@ impl Db {
                             name: format!("{}.{}", i.type_name, m.name),
                             file: path.to_path_buf(),
                             line: m.span.line,
-                            params: m.params.iter().map(|p| (p.name.clone(), type_string(&p.ty))).collect(),
+                            params: m
+                                .params
+                                .iter()
+                                .map(|p| (p.name.clone(), type_string(&p.ty)))
+                                .collect(),
                             ret: m.ret.as_ref().map(type_string),
                             docs: docs.get(&m.span.line).cloned().unwrap_or_default(),
                         };
@@ -353,13 +394,16 @@ impl Db {
     pub fn hover(&self, path: &Path, offset: usize) -> Option<Hover> {
         let fd = self.file(path)?;
         let (toks, _) = lex_with_comments(&fd.src).ok()?;
-        let tok = toks.iter().find(|t| {
-            t.span.offset <= offset && offset < t.span.offset + t.span.len.max(1)
-        })?;
+        let tok = toks
+            .iter()
+            .find(|t| t.span.offset <= offset && offset < t.span.offset + t.span.len.max(1))?;
         let name = tok.text.clone()?;
         // Only names resolve: identifiers plus keyword-spelled members.
         let kind = tok.kind;
-        if !matches!(kind, slang_syntax::TokenKind::Ident) && !kind.is_keyword() && !kind.is_type_name() {
+        if !matches!(kind, slang_syntax::TokenKind::Ident)
+            && !kind.is_keyword()
+            && !kind.is_type_name()
+        {
             return None;
         }
         // Qualified `pkg.name` or `recv.method`: look left for `a.b`.
@@ -382,7 +426,13 @@ impl Db {
         let mut out = Vec::new();
         for item in &fd.file.items {
             match item {
-                Item::Let { name, ty, init, span, .. } if ty.is_none() => {
+                Item::Let {
+                    name,
+                    ty,
+                    init,
+                    span,
+                    ..
+                } if ty.is_none() => {
                     let label = infer_expr(&fd.file, init);
                     if is_concrete_hint(&label, init) {
                         out.push(InlayHint {
@@ -421,7 +471,10 @@ impl Db {
                     symbol: ident.to_string(),
                     ty,
                     docs: String::new(),
-                    location: Location { file: path.to_path_buf(), line },
+                    location: Location {
+                        file: path.to_path_buf(),
+                        line,
+                    },
                 });
             }
         }
@@ -447,14 +500,20 @@ impl Db {
                         symbol: ident.to_string(),
                         ty: head.to_string(),
                         docs: s.docs.clone(),
-                        location: Location { file: s.file.clone(), line: s.line },
+                        location: Location {
+                            file: s.file.clone(),
+                            line: s.line,
+                        },
                     });
                 }
             }
             // Method call: infer receiver type from locals, then look up impl.
             if let Some(recv_ty) = receiver_type(self.file(path)?, head, offset) {
                 let base = recv_ty.split('[').next().unwrap_or(&recv_ty).to_string();
-                if let Some(m) = self.methods.get(&(package.to_string(), base, rest.to_string())) {
+                if let Some(m) = self
+                    .methods
+                    .get(&(package.to_string(), base, rest.to_string()))
+                {
                     return Some(func_hover(m));
                 }
             }
@@ -480,7 +539,12 @@ impl Db {
 }
 
 fn func_hover(f: &FuncSym) -> Hover {
-    let params = f.params.iter().map(|(n, t)| format!("{n}: {t}")).collect::<Vec<_>>().join(", ");
+    let params = f
+        .params
+        .iter()
+        .map(|(n, t)| format!("{n}: {t}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let sig = match &f.ret {
         Some(r) => format!("fn {}({params}) -> {r}", f.name),
         None => format!("fn {}({params})", f.name),
@@ -489,7 +553,10 @@ fn func_hover(f: &FuncSym) -> Hover {
         symbol: f.name.clone(),
         ty: sig,
         docs: f.docs.clone(),
-        location: Location { file: f.file.clone(), line: f.line },
+        location: Location {
+            file: f.file.clone(),
+            line: f.line,
+        },
     }
 }
 
@@ -498,7 +565,10 @@ fn struct_hover(s: &StructSym) -> Hover {
         symbol: s.name.clone(),
         ty: format!("struct {}", s.name),
         docs: s.docs.clone(),
-        location: Location { file: s.file.clone(), line: s.line },
+        location: Location {
+            file: s.file.clone(),
+            line: s.line,
+        },
     }
 }
 
@@ -510,7 +580,10 @@ fn collect_sl_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         if p.is_dir() {
             collect_sl_files(&p, out)?;
         } else if p.extension().map(|e| e == "sl").unwrap_or(false) {
-            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             if !name.ends_with("_test.sl") {
                 out.push(p);
             }
@@ -524,11 +597,24 @@ fn package_of(root: &Path, file: &Path) -> String {
     let dir = file.parent().unwrap_or(root);
     let base = if dir == root {
         // Entry package keeps its directory name (usually the project name).
-        dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "main".to_string())
+        dir.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "main".to_string())
     } else {
-        dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "main".to_string())
+        dir.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "main".to_string())
     };
-    let mut out: String = base.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    let mut out: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     if out.starts_with(|c: char| c.is_ascii_digit()) {
         out = format!("p_{out}");
     }
@@ -549,7 +635,13 @@ fn package_of_path(file: &Path) -> String {
 fn sanitize_package(base: &str) -> String {
     let mut out: String = base
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if out.starts_with(|c: char| c.is_ascii_digit()) {
         out = format!("p_{out}");
@@ -560,7 +652,16 @@ fn sanitize_package(base: &str) -> String {
 fn import_target(path: &str) -> String {
     // `import "a/b/util"` binds `util`; the package name is the same rule.
     let base = path.rsplit('/').next().unwrap_or(path);
-    let mut out: String = base.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    let mut out: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     if out.starts_with(|c: char| c.is_ascii_digit()) {
         out = format!("p_{out}");
     }
@@ -597,7 +698,9 @@ fn item_lines(file: &File) -> Vec<u32> {
     file.items
         .iter()
         .map(|i| match i {
-            Item::Import { span, .. } | Item::Link { span, .. } | Item::Let { span, .. } => span.line,
+            Item::Import { span, .. } | Item::Link { span, .. } | Item::Let { span, .. } => {
+                span.line
+            }
             Item::Fn(f) => f.span.line,
             Item::Struct(s) => s.span.line,
             Item::Impl(i) => i.span.line,
@@ -612,7 +715,9 @@ fn type_string(t: &Type) -> String {
         TypeKind::Array(i) => format!("[{}]", type_string(i)),
         TypeKind::Map { key, val } => format!("map[{}]{}", type_string(key), type_string(val)),
         TypeKind::Opt(i) => format!("opt[{}]", type_string(i)),
-        TypeKind::Result { ok, err } => format!("result[{}, {}]", type_string(ok), type_string(err)),
+        TypeKind::Result { ok, err } => {
+            format!("result[{}, {}]", type_string(ok), type_string(err))
+        }
         TypeKind::Chan(i) => format!("chan[{}]", type_string(i)),
         TypeKind::Join(i) => format!("join[{}]", type_string(i)),
         TypeKind::Ref(i) => format!("&{}", type_string(i)),
@@ -621,7 +726,11 @@ fn type_string(t: &Type) -> String {
         TypeKind::Gc(i) => format!("gc {}", type_string(i)),
         TypeKind::Ptr(i) => format!("*{}", type_string(i)),
         TypeKind::Fn { params, ret } => {
-            let ps = params.iter().map(type_string).collect::<Vec<_>>().join(", ");
+            let ps = params
+                .iter()
+                .map(type_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             match ret {
                 Some(r) => format!("fn({ps}) -> {}", type_string(r)),
                 None => format!("fn({ps})"),
@@ -636,8 +745,17 @@ fn local_type(fd: &FileData, name: &str, offset: usize) -> Option<(String, u32)>
     // Top-level lets are visible everywhere in the file.
     for item in &fd.file.items {
         match item {
-            Item::Let { name: n, ty, init, span, .. } if n == name && span.offset <= offset => {
-                let ty = ty.as_ref().map(type_string).unwrap_or_else(|| infer_expr(&fd.file, init));
+            Item::Let {
+                name: n,
+                ty,
+                init,
+                span,
+                ..
+            } if n == name && span.offset <= offset => {
+                let ty = ty
+                    .as_ref()
+                    .map(type_string)
+                    .unwrap_or_else(|| infer_expr(&fd.file, init));
                 return Some((ty, span.line));
             }
             Item::Fn(f) if f.span.offset <= offset && offset <= fn_end(f) => {
@@ -659,9 +777,19 @@ fn local_type(fd: &FileData, name: &str, offset: usize) -> Option<(String, u32)>
     // Main-body statements before the offset.
     let mut best: Option<(String, u32, usize)> = None;
     for s in &fd.file.body {
-        if let Stmt::Let { name: n, ty, init, span, .. } = s {
+        if let Stmt::Let {
+            name: n,
+            ty,
+            init,
+            span,
+            ..
+        } = s
+        {
             if n == name && span.offset <= offset {
-                let ty = ty.as_ref().map(type_string).unwrap_or_else(|| infer_expr(&fd.file, init));
+                let ty = ty
+                    .as_ref()
+                    .map(type_string)
+                    .unwrap_or_else(|| infer_expr(&fd.file, init));
                 best = Some((ty, span.line, span.offset));
             }
         }
@@ -673,14 +801,34 @@ fn block_local(body: &Block, file: &File, name: &str, offset: usize) -> Option<(
     let mut best: Option<(String, u32, usize)> = None;
     for s in &body.stmts {
         match s {
-            Stmt::Let { name: n, ty, init, span, .. } if n == name && span.offset <= offset => {
-                let ty = ty.as_ref().map(type_string).unwrap_or_else(|| infer_expr(file, init));
+            Stmt::Let {
+                name: n,
+                ty,
+                init,
+                span,
+                ..
+            } if n == name && span.offset <= offset => {
+                let ty = ty
+                    .as_ref()
+                    .map(type_string)
+                    .unwrap_or_else(|| infer_expr(file, init));
                 best = Some((ty, span.line, span.offset));
             }
-            Stmt::ForRange { name: n, body: b, span, .. } if n == name && span.offset <= offset => {
+            Stmt::ForRange {
+                name: n,
+                body: b,
+                span,
+                ..
+            } if n == name && span.offset <= offset => {
                 return Some(("int".to_string(), span.line));
             }
-            Stmt::ForIn { name: n, name2, iter, body: b, span } if span.offset <= offset => {
+            Stmt::ForIn {
+                name: n,
+                name2,
+                iter,
+                body: b,
+                span,
+            } if span.offset <= offset => {
                 if n == name {
                     let t = iter_elem_type(file, iter);
                     return Some((t, span.line));
@@ -731,7 +879,10 @@ fn infer_expr(_file: &File, e: &Expr) -> String {
             let rt = infer_expr(_file, rhs);
             if op == "+" && (lt == "str" || rt == "str") {
                 "str".to_string()
-            } else if matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||") {
+            } else if matches!(
+                op.as_str(),
+                "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+            ) {
                 "bool".to_string()
             } else {
                 lt
@@ -739,7 +890,10 @@ fn infer_expr(_file: &File, e: &Expr) -> String {
         }
         ExprKind::Unary { operand, .. } => infer_expr(_file, operand),
         ExprKind::List(items) => {
-            let inner = items.first().map(|e| infer_expr(_file, e)).unwrap_or_else(|| "int".to_string());
+            let inner = items
+                .first()
+                .map(|e| infer_expr(_file, e))
+                .unwrap_or_else(|| "int".to_string());
             format!("[{inner}]")
         }
         ExprKind::Index { base, .. } => {
@@ -761,7 +915,10 @@ fn infer_expr(_file: &File, e: &Expr) -> String {
 }
 
 fn fn_end(f: &slang_syntax::FnDecl) -> usize {
-    f.body.as_ref().map(|b| b.span.offset + b.span.len).unwrap_or(f.span.offset + f.span.len)
+    f.body
+        .as_ref()
+        .map(|b| b.span.offset + b.span.len)
+        .unwrap_or(f.span.offset + f.span.len)
 }
 
 /// Reconstruct `pkg.name` / `recv.method` around an identifier at `offset`.
@@ -843,7 +1000,10 @@ mod tests {
         let src = "fn add(a: int) -> int {\n    return a;\n}\n";
         let mut d = db(src);
         let path = PathBuf::from("main.sl");
-        let diags = d.update_file(&path, "fn add(a: int) -> int {\n    return a;\n}\nlet x = add(1);\n".to_string());
+        let diags = d.update_file(
+            &path,
+            "fn add(a: int) -> int {\n    return a;\n}\nlet x = add(1);\n".to_string(),
+        );
         assert!(diags.is_empty());
         let off = "fn add(a: int) -> int {\n    return a;\n}\nlet x = add(1);\n"
             .find("add(1)")
