@@ -1,1 +1,4 @@
 /target
+.DS_Store
+editors/vscode/node_modules
+editors/vscode/*.vsix

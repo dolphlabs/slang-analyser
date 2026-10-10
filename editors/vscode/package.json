@@ -5,6 +5,14 @@
     "version": "0.1.0",
     "publisher": "dolphlabs",
     "license": "MIT",
+    "homepage": "https://github.com/dolphlabs/slang-analyser",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/dolphlabs/slang-analyser.git"
+    },
+    "bugs": {
+        "url": "https://github.com/dolphlabs/slang-analyser/issues"
+    },
     "engines": {
         "vscode": "^1.85.0"
     },
@@ -12,6 +20,11 @@
     "activationEvents": [
         "onLanguage:slang"
     ],
+    "scripts": {
+        "package": "vsce package",
+        "publish:marketplace": "vsce publish",
+        "publish:openvsx": "ovsx publish"
+    },
     "main": "./client/extension.js",
     "contributes": {
         "languages": [
@@ -47,8 +60,8 @@
             "properties": {
                 "slang.serverPath": {
                     "type": "string",
-                    "default": "slanganalyser",
-                    "description": "Path to the slanganalyser language server binary."
+                    "default": "",
+                    "description": "Path to the slanganalyser binary. Empty means PATH lookup, then auto-download from GitHub releases."
                 },
                 "slang.trace.server": {
                     "type": "string",
