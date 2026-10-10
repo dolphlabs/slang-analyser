@@ -26,6 +26,7 @@
         "publish:openvsx": "ovsx publish"
     },
     "main": "./client/extension.js",
+    "icon": "images/icon.png",
     "contributes": {
         "languages": [
             {
