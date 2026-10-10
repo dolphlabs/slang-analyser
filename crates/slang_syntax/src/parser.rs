@@ -31,6 +31,10 @@ pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
     pub errors: Vec<ParseError>,
+    /// Inside `[...]` the interior is index/slice syntax, not a general
+    /// expression: a bare `..` there belongs to the slice (`xs[4..]`),
+    /// so the binary-range arm stays off while this is set.
+    no_range: bool,
 }
 
 impl Parser {
@@ -39,6 +43,7 @@ impl Parser {
             toks,
             pos: 0,
             errors: Vec::new(),
+            no_range: false,
         }
     }
 
@@ -261,13 +266,22 @@ impl Parser {
             TokenKind::KwFn => self.parse_fn(pub_, false).map(Item::Fn),
             TokenKind::KwExtern => {
                 self.bump();
-                self.expect(TokenKind::KwFn, "'fn'")?;
+                // Peek, don't consume: parse_fn bumps `fn` itself, and an
+                // expect here would eat the function's name instead.
+                if !self.at(TokenKind::KwFn) {
+                    self.err_here("expected 'fn' after 'extern'");
+                    return None;
+                }
                 self.parse_fn(pub_, true).map(Item::Fn)
             }
             TokenKind::KwStruct => self.parse_struct(pub_, false).map(Item::Struct),
             TokenKind::KwGc => {
                 self.bump();
-                self.expect(TokenKind::KwStruct, "'struct'")?;
+                // Same as above: parse_struct bumps `struct` itself.
+                if !self.at(TokenKind::KwStruct) {
+                    self.err_here("expected 'struct' after 'gc'");
+                    return None;
+                }
                 self.parse_struct(pub_, true).map(Item::Struct)
             }
             TokenKind::KwEnum => self.parse_enum(pub_).map(Item::Enum),
@@ -632,9 +646,11 @@ impl Parser {
             let end = self.peek().span;
             let span = span_between(start, end);
             return Some(match base.as_str() {
-                "map" if args.len() == 2 => {
-                    let val = args.pop().unwrap();
+                "map" if args.len() == 1 => {
+                    // `map[K]V`: the value type follows `]` directly.
                     let key = args.pop().unwrap();
+                    let val = self.parse_type()?;
+                    let span = span_between(start, val.span);
                     Type {
                         kind: TypeKind::Map {
                             key: Box::new(key),
@@ -702,6 +718,9 @@ impl Parser {
         let mut name = match t.kind {
             TokenKind::Ident => t.text.unwrap_or_default(),
             k if k.is_type_name() => k.name().trim_matches('\'').to_string(),
+            // `link` is both the `link "lib";` directive and a type name;
+            // the lexer emits KwLink for both and the position decides.
+            TokenKind::KwLink => "link".to_string(),
             TokenKind::KwFn
             | TokenKind::KwStruct
             | TokenKind::KwEnum
@@ -1232,15 +1251,20 @@ impl Parser {
         // Ranges `..` / `..=` bind loosest of the arithmetic group: they
         // are parsed here so `for i in 0..n` and slices share one shape.
         loop {
-            let op = if kinds.contains(&TokenKind::Plus) && self.at(TokenKind::DotDot) {
-                ".."
-            } else if kinds.contains(&TokenKind::Plus) && self.at(TokenKind::DotDotEq) {
-                "..="
-            } else if kinds.iter().any(|k| *k == self.peek_kind()) {
-                op_text(self.peek_kind())
-            } else {
-                break;
-            };
+            let op =
+                if !self.no_range && kinds.contains(&TokenKind::Plus) && self.at(TokenKind::DotDot)
+                {
+                    ".."
+                } else if !self.no_range
+                    && kinds.contains(&TokenKind::Plus)
+                    && self.at(TokenKind::DotDotEq)
+                {
+                    "..="
+                } else if kinds.iter().any(|k| *k == self.peek_kind()) {
+                    op_text(self.peek_kind())
+                } else {
+                    break;
+                };
             self.bump();
             let rhs = sub(self)?;
             let span = span_between(lhs.span, rhs.span);
@@ -1293,6 +1317,17 @@ impl Parser {
             });
         }
         self.parse_postfix()
+    }
+
+    /// Parse an index/slice interior: like `parse_expr`, but a top-level
+    /// `..` belongs to the slice (`xs[4..]`), not to a range expression.
+    /// Restores the flag even when parsing fails.
+    fn parse_index_expr(&mut self) -> Option<Expr> {
+        let saved = self.no_range;
+        self.no_range = true;
+        let out = self.parse_expr();
+        self.no_range = saved;
+        out
     }
 
     fn parse_postfix(&mut self) -> Option<Expr> {
@@ -1376,7 +1411,7 @@ impl Parser {
                     let end_e = if self.at(TokenKind::RBracket) {
                         None
                     } else {
-                        Some(Box::new(self.parse_expr()?))
+                        Some(Box::new(self.parse_index_expr()?))
                     };
                     self.expect(TokenKind::RBracket, "']'")?;
                     let end = self.toks[self.pos.saturating_sub(1).min(self.toks.len() - 1)].span;
@@ -1392,14 +1427,14 @@ impl Parser {
                     };
                     continue;
                 }
-                let idx = self.parse_expr()?;
+                let idx = self.parse_index_expr()?;
                 if self.at(TokenKind::DotDot) || self.at(TokenKind::DotDotEq) {
                     let inclusive = self.peek_kind() == TokenKind::DotDotEq;
                     self.bump();
                     let end_e = if self.at(TokenKind::RBracket) {
                         None
                     } else {
-                        Some(Box::new(self.parse_expr()?))
+                        Some(Box::new(self.parse_index_expr()?))
                     };
                     self.expect(TokenKind::RBracket, "']'")?;
                     let end = self.toks[self.pos.saturating_sub(1).min(self.toks.len() - 1)].span;
@@ -1579,17 +1614,17 @@ impl Parser {
         }
     }
 
-    /// True when `Ident {` is followed by struct fields (`a:`, `a =`)
-    /// or an empty body, rather than a block such as a switch body.
+    /// True when `Ident {` starts a struct literal (`Name { f: v, ... }`).
+    /// Only the colon form counts: the language's struct literals are
+    /// `field: value` (see `EX_STRUCTLIT` in `src/ast.h`), so an `if`/`while`
+    /// body opening with an assignment (`if ok { x = 1; }`) is never one.
+    /// An empty `{}` is not claimed either, so `if b {}` keeps its body.
     fn looks_like_struct_lit(&self) -> bool {
         // self.pos is at the Ident; +1 is `{`.
         let after = match self.toks.get(self.pos + 2) {
             Some(t) => t,
             None => return false,
         };
-        if after.kind == TokenKind::RBrace {
-            return true;
-        }
         // Field names may be keywords (`x.map:`), so accept those too.
         let is_name =
             after.kind == TokenKind::Ident || after.kind.is_keyword() || after.kind.is_type_name();
@@ -1598,7 +1633,7 @@ impl Parser {
         }
         matches!(
             self.toks.get(self.pos + 3).map(|t| t.kind),
-            Some(TokenKind::Colon) | Some(TokenKind::Assign)
+            Some(TokenKind::Colon)
         )
     }
 
@@ -1641,7 +1676,9 @@ impl Parser {
                     continue;
                 }
             };
-            if self.at(TokenKind::Colon) || self.at(TokenKind::Assign) {
+            // Struct literals are `field: value` (see `EX_STRUCTLIT` in
+            // `src/ast.h`); anything else is not a struct literal.
+            if self.at(TokenKind::Colon) {
                 self.bump();
             } else {
                 self.err_here("expected ':' in struct literal");

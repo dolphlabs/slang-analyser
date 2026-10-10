@@ -3,3 +3,4 @@
 editors/vscode/node_modules
 editors/vscode/*.vsix
 .env
+package-lock.json

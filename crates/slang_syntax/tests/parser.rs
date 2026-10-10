@@ -57,3 +57,53 @@ fn should_recover_from_broken_code() {
         .iter()
         .any(|i| matches!(i, slang_syntax::Item::Fn(f) if f.name == "ok")));
 }
+
+#[test]
+fn should_parse_gc_struct_extern_and_link() {
+    // Regression: the `gc`/`extern` arms once ate `struct`/`fn` and then
+    // the sub-parser ate the declared name instead.
+    let f = parse_src(
+        "pub gc struct Value {\n    kind: int,\n    document: opt[Document],\n}\nlink \"sqlite3\";\nextern fn sqlite3_libversion() -> str;\n",
+    );
+    assert_eq!(f.items.len(), 3);
+    assert!(
+        matches!(&f.items[0], slang_syntax::Item::Struct(s) if s.name == "Value" && s.gc && s.pub_)
+    );
+    assert!(matches!(&f.items[1], slang_syntax::Item::Link { .. }));
+    assert!(
+        matches!(&f.items[2], slang_syntax::Item::Fn(f) if f.name == "sqlite3_libversion" && f.extern_)
+    );
+}
+
+#[test]
+fn should_parse_map_value_after_bracket() {
+    let f = parse_src("struct C {\n    params: map[str]str,\n    counts: map[str]int,\n}\n");
+    assert_eq!(f.items.len(), 1);
+}
+
+#[test]
+fn should_parse_open_slices() {
+    let f = parse_src("fn f(b: bytes) -> bytes {\n    return b[4..] + b[..2] + b[1..3];\n}\n");
+    assert_eq!(f.items.len(), 1);
+}
+
+#[test]
+fn should_parse_assignment_first_if_body() {
+    // Regression: `if b { s = 1; }` was read as struct literal `b { s = 1 }`.
+    let f = parse_src("fn f(b: bool) {\n    let s = \"false\";\n    if b {\n        s = \"true\";\n    }\n    while b {\n        s = \"x\";\n    }\n}\n");
+    assert_eq!(f.items.len(), 1);
+}
+
+#[test]
+fn should_still_parse_colon_struct_literals() {
+    let f = parse_src(
+        "fn f() {\n    let p = Point { x: 1, y: 2 };\n    let q = Box[int] { v: 3 };\n}\n",
+    );
+    assert_eq!(f.items.len(), 1);
+}
+
+#[test]
+fn should_parse_borrow_link_wire_until_types() {
+    let f = parse_src("fn read_frame(c: &mut link, buf: wire, d: until) -> result[int, str] {\n    return ok(1);\n}\n");
+    assert_eq!(f.items.len(), 1);
+}

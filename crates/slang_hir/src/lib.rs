@@ -149,6 +149,10 @@ pub struct Db {
     methods: HashMap<(String, String, String), FuncSym>,
     /// (package, alias) -> target package for `import "x" [as y]`.
     imports: HashMap<(String, String), String>,
+    /// Parse errors per file. Files with errors are still indexed from
+    /// their recovered AST: one unknown construct must never blind the
+    /// whole workspace. Only unreadable/unlexable files are skipped.
+    file_errors: HashMap<PathBuf, Vec<slang_syntax::ParseError>>,
 }
 
 impl Db {
@@ -162,6 +166,7 @@ impl Db {
             structs: HashMap::new(),
             methods: HashMap::new(),
             imports: HashMap::new(),
+            file_errors: HashMap::new(),
         };
         let mut sl_files = Vec::new();
         collect_sl_files(root, &mut sl_files)
@@ -171,11 +176,25 @@ impl Db {
             let src = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let package = package_of(root, &path);
-            let (toks, comments) =
-                lex_with_comments(&src).map_err(|e| format!("{}: {e}", path.display()))?;
+            let (toks, comments) = match lex_with_comments(&src) {
+                Ok(v) => v,
+                // Unlexable files are skipped but recorded; the rest of
+                // the workspace still indexes.
+                Err(e) => {
+                    db.file_errors.insert(
+                        path.clone(),
+                        vec![slang_syntax::ParseError {
+                            line: e.line,
+                            offset: e.offset,
+                            message: e.message,
+                        }],
+                    );
+                    continue;
+                }
+            };
             let (file, errors) = parse(toks);
-            if let Some(first) = errors.first() {
-                return Err(format!("{}: {first}", path.display()));
+            if !errors.is_empty() {
+                db.file_errors.insert(path.clone(), errors);
             }
             let docs = attach_docs(&comments, &file);
             let fid = FileId(db.files.len());
@@ -278,6 +297,7 @@ impl Db {
             structs: HashMap::new(),
             methods: HashMap::new(),
             imports: HashMap::new(),
+            file_errors: HashMap::new(),
         };
         let (toks, comments) = lex_with_comments(src).map_err(|e| e.to_string())?;
         let (file, errors) = parse(toks);
@@ -414,6 +434,11 @@ impl Db {
     /// Goto-definition at a byte offset.
     pub fn goto_def(&self, path: &Path, offset: usize) -> Option<Location> {
         self.hover(path, offset).map(|h| h.location)
+    }
+
+    /// Parse errors recorded for a file at load time, if any.
+    pub fn file_errors(&self, path: &Path) -> &[slang_syntax::ParseError] {
+        self.file_errors.get(path).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Inlay hints: inferred types for `let` bindings without annotation.
