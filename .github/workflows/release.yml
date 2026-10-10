@@ -1,0 +1,134 @@
+name: release
+
+# Tag `v0.1.0` to ship: server binaries for five targets, checksums,
+# and the VSCode extension (.vsix) attached to the GitHub release.
+# Marketplace publishing runs when VSCE_PAT / OPEN_VSX_TOKEN exist.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  server:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: slanganalyser
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            exe: slanganalyser
+          - os: macos-13
+            target: x86_64-apple-darwin
+            exe: slanganalyser
+          - os: macos-14
+            target: aarch64-apple-darwin
+            exe: slanganalyser
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            exe: slanganalyser.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross linker (linux arm64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - run: cargo build --release -p slanganalyser --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.exe }} dist/
+          (cd dist && shasum -a 256 ${{ matrix.exe }} > ${{ matrix.exe }}.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slanganalyser-${{ matrix.target }}
+          path: dist/
+
+  publish-github:
+    needs: [server]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Re-zip per target
+        shell: bash
+        run: |
+          mkdir -p dist
+          for d in artifacts/slanganalyser-*/; do
+            target=$(basename "$d" | sed 's/^slanganalyser-//')
+            (cd "$d" && zip "../../dist/slanganalyser-$target.zip" ./*)
+          done
+          (cd dist && shasum -a 256 slanganalyser-*.zip > SHA256SUMS.txt)
+          ls dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Package extension
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          node -e "const fs=require('fs');const p='editors/vscode/package.json';const j=JSON.parse(fs.readFileSync(p));j.version=process.env.TAG.replace(/^v/,'');fs.writeFileSync(p,JSON.stringify(j,null,4)+'\n')"
+        env:
+          TAG: ${{ github.ref_name }}
+      - run: npm install --no-audit --no-fund
+        working-directory: editors/vscode
+      - run: npx --yes @vscode/vsce package -o "../../dist/slang-${GITHUB_REF#refs/tags/}.vsix"
+        working-directory: editors/vscode
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  publish-marketplace:
+    needs: [publish-github]
+    runs-on: ubuntu-22.04
+    if: ${{ secrets.VSCE_PAT != '' }}
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-audit --no-fund
+      - run: npx --yes @vscode/vsce publish -p "$VSCE_PAT"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+  publish-openvsx:
+    needs: [publish-github]
+    runs-on: ubuntu-22.04
+    if: ${{ secrets.OPEN_VSX_TOKEN != '' }}
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-audit --no-fund
+      - run: npx --yes ovsx publish -p "$OPEN_VSX_TOKEN"
+        env:
+          OPEN_VSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
