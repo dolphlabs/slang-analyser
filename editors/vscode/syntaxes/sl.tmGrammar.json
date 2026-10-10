@@ -1,0 +1,107 @@
+{
+    "scopeName": "source.slang",
+    "name": "slang",
+    "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        { "include": "#bytes" },
+        { "include": "#numbers" },
+        { "include": "#keywords" },
+        { "include": "#types" },
+        { "include": "#operators" }
+    ],
+    "repository": {
+        "comments": {
+            "patterns": [
+                {
+                    "name": "comment.line.double-slash.slang",
+                    "match": "//.*$"
+                }
+            ]
+        },
+        "strings": {
+            "patterns": [
+                {
+                    "name": "string.quoted.double.slang",
+                    "begin": "\"",
+                    "end": "\"",
+                    "patterns": [
+                        {
+                            "name": "constant.character.escape.slang",
+                            "match": "\\\\(n|t|r|0|\"|\\\\)"
+                        },
+                        {
+                            "name": "meta.interpolation.slang",
+                            "begin": "\\$\\{",
+                            "end": "\\}",
+                            "patterns": [{ "include": "$self" }]
+                        }
+                    ]
+                }
+            ]
+        },
+        "bytes": {
+            "patterns": [
+                {
+                    "name": "string.other.bytes.slang",
+                    "begin": "b\"",
+                    "end": "\"",
+                    "patterns": [
+                        {
+                            "name": "constant.character.escape.slang",
+                            "match": "\\\\(n|t|r|0|\"|\\\\|x[0-9a-fA-F]{2})"
+                        }
+                    ]
+                }
+            ]
+        },
+        "numbers": {
+            "patterns": [
+                {
+                    "name": "constant.numeric.hex.slang",
+                    "match": "\\b0[xX][0-9a-fA-F_]+\\b"
+                },
+                {
+                    "name": "constant.numeric.binary.slang",
+                    "match": "\\b0[bB][01_]+\\b"
+                },
+                {
+                    "name": "constant.numeric.float.slang",
+                    "match": "\\b[0-9][0-9_]*\\.[0-9]+\\b"
+                },
+                {
+                    "name": "constant.numeric.integer.slang",
+                    "match": "\\b[0-9][0-9_]*\\b"
+                }
+            ]
+        },
+        "keywords": {
+            "patterns": [
+                {
+                    "name": "keyword.control.slang",
+                    "match": "\\b(let|fn|if|else|while|return|for|in|guard|switch|case|default|break|continue|spawn|select|as|import|pub|struct|enum|impl|gc|own|mut|extern|link|unsafe)\\b"
+                },
+                {
+                    "name": "constant.language.slang",
+                    "match": "\\b(true|false|none|some|ok|err|self)\\b"
+                }
+            ]
+        },
+        "types": {
+            "patterns": [
+                {
+                    "name": "storage.type.slang",
+                    "match": "\\b(int|float|str|bool|bytes|i8|i16|i32|i64|u8|u16|u32|u64|f32|map|opt|result|duration|rawptr|arena|wire|until|fault|peer|trip|link|chan|join|mutex)\\b"
+                }
+            ]
+        },
+        "operators": {
+            "patterns": [
+                {
+                    "name": "keyword.operator.slang",
+                    "match": "(\\.\\.=|\\.\\.|->|\\?\\?|==|!=|<=|>=|&&|\\|\\||<<=|>>=|<<|>>|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|[+\\-*/%<>&|^~!]=?|::|:|;|,|\\.|=)"
+                }
+            ]
+        }
+    }
+}
