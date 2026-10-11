@@ -43,7 +43,7 @@ pub struct StructSym {
     pub name: String,
     pub file: PathBuf,
     pub line: u32,
-    pub fields: Vec<(String, String)>,
+    pub fields: Vec<(String, String, u32)>,
     pub docs: String,
 }
 
@@ -54,78 +54,29 @@ pub struct InlayHint {
     pub label: String,
 }
 
-/// Only hint when inference produced something more useful than the
-/// initializer's own text (a bare identifier or opaque call/field).
+/// Hint when inference says more than the initializer's own text.
+/// Calls and field walks now resolve to real types, so they hint too;
+/// only unknown or circular results are withheld.
 fn is_concrete_hint(label: &str, init: &Expr) -> bool {
+    if label.starts_with('{') || label == "call" || label == "field" {
+        return false;
+    }
     match &init.kind {
         ExprKind::Ident(n) => label != n,
-        ExprKind::Call { .. } | ExprKind::Field { .. } => false,
         _ => true,
     }
 }
 
-fn collect_hints(file: &File, body: &Block, out: &mut Vec<InlayHint>) {
-    for s in &body.stmts {
-        stmt_hints(file, s, out);
-    }
+#[derive(Debug, Clone)]
+pub struct ConstSym {
+    pub package: String,
+    pub name: String,
+    pub file: PathBuf,
+    pub line: u32,
+    pub ty: String,
+    pub docs: String,
 }
 
-fn stmt_hints(file: &File, s: &Stmt, out: &mut Vec<InlayHint>) {
-    match s {
-        Stmt::Let {
-            name,
-            ty,
-            init,
-            span,
-        } if ty.is_none() => {
-            let label = infer_expr(file, init);
-            if is_concrete_hint(&label, init) {
-                out.push(InlayHint {
-                    offset: span.offset + 4 + name.len(),
-                    label: format!(": {label}"),
-                });
-            }
-        }
-        Stmt::If { then, else_, .. } => {
-            collect_hints(file, then, out);
-            if let Some(Else::Block(b)) = else_ {
-                collect_hints(file, b, out);
-            }
-        }
-        Stmt::While { body, .. }
-        | Stmt::ForRange { body, .. }
-        | Stmt::ForIn { body, .. }
-        | Stmt::Unsafe { body, .. } => {
-            collect_hints(file, body, out);
-        }
-        Stmt::GuardLet { body, .. } => collect_hints(file, body, out),
-        Stmt::IfLet { then, else_, .. } => {
-            collect_hints(file, then, out);
-            if let Some(b) = else_ {
-                collect_hints(file, b, out);
-            }
-        }
-        Stmt::Select { cases, default, .. } => {
-            for c in cases {
-                collect_hints(file, &c.body, out);
-            }
-            if let Some(d) = default {
-                collect_hints(file, d, out);
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for c in cases {
-                if let SwitchBody::Block(b) = &c.body {
-                    collect_hints(file, b, out);
-                }
-            }
-            if let Some(d) = default {
-                collect_hints(file, d, out);
-            }
-        }
-        _ => {}
-    }
-}
 #[derive(Debug, Clone)]
 pub struct Location {
     pub file: PathBuf,
@@ -149,6 +100,8 @@ pub struct Db {
     methods: HashMap<(String, String, String), FuncSym>,
     /// (package, alias) -> target package for `import "x" [as y]`.
     imports: HashMap<(String, String), String>,
+    /// (package, name) -> package-level `let` global.
+    consts: HashMap<(String, String), ConstSym>,
     /// Parse errors per file. Files with errors are still indexed from
     /// their recovered AST: one unknown construct must never blind the
     /// whole workspace. Only unreadable/unlexable files are skipped.
@@ -166,6 +119,7 @@ impl Db {
             structs: HashMap::new(),
             methods: HashMap::new(),
             imports: HashMap::new(),
+            consts: HashMap::new(),
             file_errors: HashMap::new(),
         };
         let mut sl_files = Vec::new();
@@ -197,26 +151,29 @@ impl Db {
                 db.file_errors.insert(path.clone(), errors);
             }
             let docs = attach_docs(&comments, &file);
+            let fd = FileData {
+                path: path.clone(),
+                package,
+                src,
+                file,
+            };
             let fid = FileId(db.files.len());
             db.file_index.insert(path.clone(), fid);
             // Record imports before indexing symbols so aliases resolve.
-            for item in &file.items {
+            for item in &fd.file.items {
                 if let Item::Import {
                     path: ip, alias, ..
                 } = item
                 {
                     let target = import_target(ip);
                     let bind = alias.clone().unwrap_or_else(|| target.clone());
-                    db.imports.entry((package.clone(), bind)).or_insert(target);
+                    db.imports
+                        .entry((fd.package.clone(), bind))
+                        .or_insert(target);
                 }
             }
-            db.index_file_symbols(&file, &package, &path, &docs);
-            db.files.push(FileData {
-                path: path.to_path_buf(),
-                package,
-                src,
-                file,
-            });
+            db.index_file_symbols(&fd, &docs);
+            db.files.push(fd);
         }
         Ok(db)
     }
@@ -263,18 +220,13 @@ impl Db {
         self.structs.clear();
         self.methods.clear();
         self.imports.clear();
-        let snapshot: Vec<(File, String, PathBuf, HashMap<u32, String>)> = self
-            .files
-            .iter()
-            .map(|fd| {
-                let docs = lex_with_comments(&fd.src)
-                    .map(|(_, comments)| attach_docs(&comments, &fd.file))
-                    .unwrap_or_default();
-                (fd.file.clone(), fd.package.clone(), fd.path.clone(), docs)
-            })
-            .collect();
-        for (file, package, path, docs) in &snapshot {
-            for item in &file.items {
+        self.consts.clear();
+        let snapshot = self.files.clone();
+        for fd in &snapshot {
+            let docs = lex_with_comments(&fd.src)
+                .map(|(_, comments)| attach_docs(&comments, &fd.file))
+                .unwrap_or_default();
+            for item in &fd.file.items {
                 if let Item::Import {
                     path: ip, alias, ..
                 } = item
@@ -282,11 +234,11 @@ impl Db {
                     let target = import_target(ip);
                     let bind = alias.clone().unwrap_or_else(|| target.clone());
                     self.imports
-                        .entry((package.clone(), bind))
+                        .entry((fd.package.clone(), bind))
                         .or_insert(target);
                 }
             }
-            self.index_file_symbols(file, package, path, docs);
+            self.index_file_symbols(fd, &docs);
         }
     }
     pub fn load_single(package: &str, path: &Path, src: &str) -> Result<Self, String> {
@@ -297,6 +249,7 @@ impl Db {
             structs: HashMap::new(),
             methods: HashMap::new(),
             imports: HashMap::new(),
+            consts: HashMap::new(),
             file_errors: HashMap::new(),
         };
         let (toks, comments) = lex_with_comments(src).map_err(|e| e.to_string())?;
@@ -305,25 +258,21 @@ impl Db {
             return Err(first.to_string());
         }
         let docs = attach_docs(&comments, &file);
-        db.index_file_symbols(&file, package, path, &docs);
-        let fid = FileId(db.files.len());
-        db.file_index.insert(path.to_path_buf(), fid);
-        db.files.push(FileData {
+        let fd = FileData {
             path: path.to_path_buf(),
             package: package.to_string(),
             src: src.to_string(),
             file,
-        });
+        };
+        db.index_file_symbols(&fd, &docs);
+        let fid = FileId(db.files.len());
+        db.file_index.insert(path.to_path_buf(), fid);
+        db.files.push(fd);
         Ok(db)
     }
 
-    fn index_file_symbols(
-        &mut self,
-        file: &File,
-        package: &str,
-        path: &Path,
-        docs: &HashMap<u32, String>,
-    ) {
+    fn index_file_symbols(&mut self, fd: &FileData, docs: &HashMap<u32, String>) {
+        let (file, package, path) = (&fd.file, fd.package.clone(), fd.path.clone());
         for item in &file.items {
             match item {
                 Item::Fn(f) => {
@@ -353,7 +302,7 @@ impl Db {
                         fields: s
                             .fields
                             .iter()
-                            .map(|f| (f.name.clone(), type_string(&f.ty)))
+                            .map(|f| (f.name.clone(), type_string(&f.ty), f.span.line))
                             .collect(),
                         docs: docs.get(&s.span.line).cloned().unwrap_or_default(),
                     };
@@ -372,7 +321,7 @@ impl Db {
                         fields: e
                             .variants
                             .iter()
-                            .map(|v| (v.name.clone(), String::new()))
+                            .map(|v| (v.name.clone(), String::new(), v.span.line))
                             .collect(),
                         docs: docs.get(&e.span.line).cloned().unwrap_or_default(),
                     };
@@ -396,9 +345,34 @@ impl Db {
                             docs: docs.get(&m.span.line).cloned().unwrap_or_default(),
                         };
                         self.methods
-                            .entry((package.to_string(), i.type_name.clone(), m.name.clone()))
+                            .entry((package.clone(), i.type_name.clone(), m.name.clone()))
                             .or_insert(sym);
                     }
+                }
+                Item::Let {
+                    name,
+                    ty,
+                    init,
+                    span,
+                    ..
+                } => {
+                    // Package-level globals: visible file-wide and, when
+                    // `pub`, to importers. Unannotated ones infer.
+                    let t = ty
+                        .as_ref()
+                        .map(type_string)
+                        .unwrap_or_else(|| self.infer_expr(fd, init, init.span.offset));
+                    let sym = ConstSym {
+                        package: package.clone(),
+                        name: name.clone(),
+                        file: path.clone(),
+                        line: span.line,
+                        ty: t,
+                        docs: docs.get(&span.line).cloned().unwrap_or_default(),
+                    };
+                    self.consts
+                        .entry((package.clone(), name.clone()))
+                        .or_insert(sym);
                 }
                 _ => {}
             }
@@ -426,9 +400,14 @@ impl Db {
         {
             return None;
         }
-        // Qualified `pkg.name` or `recv.method`: look left for `a.b`.
+        // Qualified `pkg.name`, `recv.method`, or full chains like
+        // `c.config.database`: the path up to the cursor's own segment.
         let ident = qualified_at(&fd.src, offset, &name);
-        self.resolve(&fd.package, path, &ident, offset)
+        // A `(` after optional whitespace means the cursor names a call:
+        // prefer methods over fields for `recv.method(...)`.
+        let after = &fd.src[tok.span.offset + tok.span.len..];
+        let is_call = after.trim_start_matches([' ', '\t']).starts_with('(');
+        self.resolve(&fd.package, path, &ident, offset, is_call)
     }
 
     /// Goto-definition at a byte offset.
@@ -458,7 +437,7 @@ impl Db {
                     span,
                     ..
                 } if ty.is_none() => {
-                    let label = infer_expr(&fd.file, init);
+                    let label = self.infer_expr(fd, init, init.span.offset);
                     if is_concrete_hint(&label, init) {
                         out.push(InlayHint {
                             offset: span.offset + 4 + name.len(),
@@ -468,13 +447,13 @@ impl Db {
                 }
                 Item::Fn(f) => {
                     if let Some(body) = &f.body {
-                        collect_hints(&fd.file, body, &mut out);
+                        self.collect_hints(fd, body, &mut out);
                     }
                 }
                 Item::Impl(i) => {
                     for m in &i.methods {
                         if let Some(body) = &m.body {
-                            collect_hints(&fd.file, body, &mut out);
+                            self.collect_hints(fd, body, &mut out);
                         }
                     }
                 }
@@ -482,16 +461,24 @@ impl Db {
             }
         }
         for s in &fd.file.body {
-            stmt_hints(&fd.file, s, &mut out);
+            self.stmt_hints(fd, s, &mut out);
         }
         out.sort_by_key(|h| h.offset);
         out
     }
 
-    fn resolve(&self, package: &str, path: &Path, ident: &str, offset: usize) -> Option<Hover> {
-        // 1. Locals first: walk enclosing lets/params at this offset.
+    fn resolve(
+        &self,
+        package: &str,
+        path: &Path,
+        ident: &str,
+        offset: usize,
+        is_call: bool,
+    ) -> Option<Hover> {
+        let fd = self.file(path)?;
+        // 1. Locals first (unqualified names only), then package globals.
         if !ident.contains('.') {
-            if let Some((ty, line)) = local_type(self.file(path)?, ident, offset) {
+            if let Some((ty, line)) = self.local_type(fd, ident, offset) {
                 return Some(Hover {
                     symbol: ident.to_string(),
                     ty,
@@ -502,25 +489,46 @@ impl Db {
                     },
                 });
             }
+            if let Some(c) = self.consts.get(&(package.to_string(), ident.to_string())) {
+                return Some(const_hover(c));
+            }
+            if let Some(f) = self.funcs.get(&(package.to_string(), ident.to_string())) {
+                return Some(func_hover(f));
+            }
+            if let Some(s) = self.structs.get(&(package.to_string(), ident.to_string())) {
+                return Some(struct_hover(s));
+            }
+            // Imported name used unqualified via alias.
+            for ((pkg, bind), target) in &self.imports {
+                if pkg == package && bind == ident {
+                    if let Some(f) = self.funcs.get(&(target.clone(), ident.to_string())) {
+                        return Some(func_hover(f));
+                    }
+                    if let Some(c) = self.consts.get(&(target.clone(), ident.to_string())) {
+                        return Some(const_hover(c));
+                    }
+                }
+            }
+            return None;
         }
-        // 2. `pkg.name`: alias through imports, else same-package type.
-        if let Some((head, rest)) = ident.split_once('.') {
-            // Method on a value (`p.sum`) vs package call (`geo.area`):
-            // try package-qualified first, then method on inferred receiver.
+        let parts: Vec<&str> = ident.split('.').collect();
+        // 2. Two-part import-qualified names: functions, constants, types.
+        if parts.len() == 2 {
+            let (head, rest) = (parts[0], parts[1]);
             if let Some(target) = self.imports.get(&(package.to_string(), head.to_string())) {
                 if let Some(f) = self.funcs.get(&(target.clone(), rest.to_string())) {
                     return Some(func_hover(f));
+                }
+                if let Some(c) = self.consts.get(&(target.clone(), rest.to_string())) {
+                    return Some(const_hover(c));
                 }
                 if let Some(s) = self.structs.get(&(target.clone(), rest.to_string())) {
                     return Some(struct_hover(s));
                 }
             }
-            if let Some(f) = self.funcs.get(&(package.to_string(), ident.to_string())) {
-                return Some(func_hover(f));
-            }
             // `Type.Variant` enum reference.
             if let Some(s) = self.structs.get(&(package.to_string(), head.to_string())) {
-                if s.fields.iter().any(|(n, _)| n == rest) {
+                if s.fields.iter().any(|(n, _, _)| n == rest) {
                     return Some(Hover {
                         symbol: ident.to_string(),
                         ty: head.to_string(),
@@ -532,34 +540,113 @@ impl Db {
                     });
                 }
             }
-            // Method call: infer receiver type from locals, then look up impl.
-            if let Some(recv_ty) = receiver_type(self.file(path)?, head, offset) {
-                let base = recv_ty.split('[').next().unwrap_or(&recv_ty).to_string();
-                if let Some(m) = self
-                    .methods
-                    .get(&(package.to_string(), base, rest.to_string()))
-                {
-                    return Some(func_hover(m));
-                }
-            }
-            return None;
         }
-        // 3. Same-package function / struct / method on Self-like receiver.
-        if let Some(f) = self.funcs.get(&(package.to_string(), ident.to_string())) {
-            return Some(func_hover(f));
-        }
-        if let Some(s) = self.structs.get(&(package.to_string(), ident.to_string())) {
-            return Some(struct_hover(s));
-        }
-        // 4. Imported name used unqualified via alias shadowing a function.
-        for ((pkg, bind), target) in &self.imports {
-            if pkg == package && bind == ident {
-                if let Some(f) = self.funcs.get(&(target.clone(), ident.to_string())) {
-                    return Some(func_hover(f));
-                }
-            }
+        // 3. Value chain walk: `c.config.database`. Plain access prefers
+        // fields, call position prefers methods; each falls back.
+        if let Some(chain) = self.walk_chain(fd, package, &parts, offset, is_call) {
+            return Some(chain);
         }
         None
+    }
+
+    /// Walk `head.mid....last` starting from a local binding: each step
+    /// resolves as a struct field or a method, with the definition site.
+    fn walk_chain(
+        &self,
+        fd: &FileData,
+        package: &str,
+        parts: &[&str],
+        offset: usize,
+        is_call: bool,
+    ) -> Option<Hover> {
+        let (mut cur_ty, head_line) = self.local_type(fd, parts[0], offset)?;
+        let mut loc = Location {
+            file: fd.path.clone(),
+            line: head_line,
+        };
+        for (i, part) in parts[1..].iter().enumerate() {
+            let last = i == parts.len() - 2;
+            let base = generic_base(&cur_ty).to_string();
+            // A call's name resolves to the method itself (signature +
+            // docs), like a plain function call does.
+            if last && is_call {
+                if let Some(m) =
+                    self.methods
+                        .get(&(package.to_string(), base.clone(), part.to_string()))
+                {
+                    let params = m
+                        .params
+                        .iter()
+                        .map(|(n, t)| format!("{n}: {t}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sig = match &m.ret {
+                        Some(r) => format!("fn {}({params}) -> {r}", m.name),
+                        None => format!("fn {}({params})", m.name),
+                    };
+                    return Some(Hover {
+                        symbol: parts.join("."),
+                        ty: sig,
+                        docs: m.docs.clone(),
+                        location: Location {
+                            file: m.file.clone(),
+                            line: m.line,
+                        },
+                    });
+                }
+            }
+            let mut hit: Option<(String, Location)> = None;
+            // Plain access prefers the field; a call prefers the method.
+            if !(last && is_call) {
+                if let Some((ft, ff, fl)) = self.struct_field_loc(package, &base, part) {
+                    hit = Some((ft, Location { file: ff, line: fl }));
+                }
+            }
+            if hit.is_none() {
+                if let Some(m) =
+                    self.methods
+                        .get(&(package.to_string(), base.clone(), part.to_string()))
+                {
+                    hit = Some((
+                        m.ret.clone().unwrap_or_else(|| "()".to_string()),
+                        Location {
+                            file: m.file.clone(),
+                            line: m.line,
+                        },
+                    ));
+                }
+            }
+            if hit.is_none() {
+                if let Some((ft, ff, fl)) = self.struct_field_loc(package, &base, part) {
+                    hit = Some((ft, Location { file: ff, line: fl }));
+                }
+            }
+            match hit {
+                Some((t, l)) => {
+                    cur_ty = t;
+                    loc = l;
+                }
+                None => return None,
+            }
+        }
+        Some(Hover {
+            symbol: parts.join("."),
+            ty: cur_ty,
+            docs: String::new(),
+            location: loc,
+        })
+    }
+}
+
+fn const_hover(c: &ConstSym) -> Hover {
+    Hover {
+        symbol: c.name.clone(),
+        ty: format!("let {}: {}", c.name, c.ty),
+        docs: c.docs.clone(),
+        location: Location {
+            file: c.file.clone(),
+            line: c.line,
+        },
     }
 }
 
@@ -764,179 +851,571 @@ fn type_string(t: &Type) -> String {
     }
 }
 
-/// Find the enclosing local (`let` or parameter) for `name` visible at
-/// `offset`, returning its inferred type and definition line.
-fn local_type(fd: &FileData, name: &str, offset: usize) -> Option<(String, u32)> {
-    // Top-level lets are visible everywhere in the file.
-    for item in &fd.file.items {
-        match item {
-            Item::Let {
+impl Db {
+    /// Find the enclosing local (`let`, parameter, `guard`/`if let` binding)
+    /// for `name` visible at `offset`: inferred type + definition line.
+    /// Identifier chains (`let b = a;`) are followed to a concrete type.
+    fn local_type(&self, fd: &FileData, name: &str, offset: usize) -> Option<(String, u32)> {
+        let (ty, line) = self.local_raw(fd, name, offset)?;
+        Some((self.chase(fd, ty, name, offset), line))
+    }
+
+    /// Single lookup step without chain-following (see `chase`).
+    fn local_raw(&self, fd: &FileData, name: &str, offset: usize) -> Option<(String, u32)> {
+        // Top-level lets are visible everywhere in the file.
+        for item in &fd.file.items {
+            match item {
+                Item::Let {
+                    name: n,
+                    ty,
+                    init,
+                    span,
+                    ..
+                } if n == name && span.offset <= offset => {
+                    let ty = ty
+                        .as_ref()
+                        .map(type_string)
+                        .unwrap_or_else(|| self.infer_expr(fd, init, init.span.offset));
+                    return Some((ty, span.line));
+                }
+                Item::Fn(f) if f.span.offset <= offset && offset <= fn_end(f) => {
+                    // Parameters first.
+                    for p in &f.params {
+                        if p.name == name {
+                            return Some((type_string(&p.ty), p.span.line));
+                        }
+                    }
+                    if let Some(body) = &f.body {
+                        if let Some(hit) = self.block_local(fd, body, name, offset) {
+                            return Some(hit);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Main-body statements before the offset.
+        let mut best: Option<(String, u32, usize)> = None;
+        for s in &fd.file.body {
+            if let Stmt::Let {
                 name: n,
                 ty,
                 init,
                 span,
                 ..
-            } if n == name && span.offset <= offset => {
-                let ty = ty
-                    .as_ref()
-                    .map(type_string)
-                    .unwrap_or_else(|| infer_expr(&fd.file, init));
-                return Some((ty, span.line));
-            }
-            Item::Fn(f) if f.span.offset <= offset && offset <= fn_end(f) => {
-                // Parameters first.
-                for p in &f.params {
-                    if p.name == name {
-                        return Some((type_string(&p.ty), p.span.line));
-                    }
-                }
-                if let Some(body) = &f.body {
-                    if let Some(hit) = block_local(body, &fd.file, name, offset) {
-                        return Some(hit);
-                    }
+            } = s
+            {
+                if n == name && span.offset <= offset {
+                    let ty = ty
+                        .as_ref()
+                        .map(type_string)
+                        .unwrap_or_else(|| self.infer_expr(fd, init, init.span.offset));
+                    best = Some((ty, span.line, span.offset));
                 }
             }
-            _ => {}
         }
+        best.map(|(t, l, _)| (t, l))
     }
-    // Main-body statements before the offset.
-    let mut best: Option<(String, u32, usize)> = None;
-    for s in &fd.file.body {
-        if let Stmt::Let {
-            name: n,
-            ty,
-            init,
-            span,
-            ..
-        } = s
-        {
-            if n == name && span.offset <= offset {
-                let ty = ty
-                    .as_ref()
-                    .map(type_string)
-                    .unwrap_or_else(|| infer_expr(&fd.file, init));
-                best = Some((ty, span.line, span.offset));
-            }
-        }
-    }
-    best.map(|(t, l, _)| (t, l))
-}
 
-fn block_local(body: &Block, file: &File, name: &str, offset: usize) -> Option<(String, u32)> {
-    let mut best: Option<(String, u32, usize)> = None;
-    for s in &body.stmts {
+    /// Follow `let`-chains to a concrete type, bounded so odd cycles end.
+    fn chase(&self, fd: &FileData, ty: String, exclude: &str, offset: usize) -> String {
+        let mut cur = ty;
+        for _ in 0..8 {
+            if cur == exclude || !is_bare_ident(&cur) {
+                break;
+            }
+            let next = cur.clone();
+            match self.local_raw(fd, &next, offset) {
+                Some((t, _)) if t != cur => cur = t,
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    fn block_local(
+        &self,
+        fd: &FileData,
+        body: &Block,
+        name: &str,
+        offset: usize,
+    ) -> Option<(String, u32)> {
+        let mut best: Option<(String, u32, usize)> = None;
+        for s in &body.stmts {
+            match s {
+                Stmt::Let {
+                    name: n,
+                    ty,
+                    init,
+                    span,
+                    ..
+                } if n == name && span.offset <= offset => {
+                    let ty = ty
+                        .as_ref()
+                        .map(type_string)
+                        .unwrap_or_else(|| self.infer_expr(fd, init, init.span.offset));
+                    best = Some((ty, span.line, span.offset));
+                }
+                Stmt::GuardLet {
+                    name: n,
+                    expr,
+                    err_name,
+                    err_expr,
+                    body,
+                    span,
+                    ..
+                } => {
+                    if n == name && span.offset <= offset {
+                        // `guard let x = opt_or_result`: x is the unwrapped value.
+                        let t = self.infer_expr(fd, expr, expr.span.offset);
+                        let t = self.chase(fd, t, name, offset);
+                        return Some((unwrap_single(&t), span.line));
+                    }
+                    // `else let e = err_of(x)`: e lives in the diverging
+                    // else block and in the header declaring it.
+                    if let (Some(en), Some(ee)) = (err_name, err_expr) {
+                        let end = body.span.offset + body.span.len;
+                        if en == name && span.offset <= offset && offset <= end {
+                            return Some((self.infer_expr(fd, ee, ee.span.offset), span.line));
+                        }
+                    }
+                }
+                Stmt::IfLet {
+                    name: n,
+                    expr,
+                    then,
+                    err_name,
+                    err_expr,
+                    else_,
+                    span,
+                    ..
+                } => {
+                    // The binding is declared in the header (`if/else let`),
+                    // so the header itself counts as in scope, through the
+                    // end of the `then` block.
+                    let then_end = then.span.offset + then.span.len;
+                    if n == name && span.offset <= offset && offset <= then_end {
+                        let t = self.infer_expr(fd, expr, expr.span.offset);
+                        let t = self.chase(fd, t, name, offset);
+                        return Some((unwrap_single(&t), span.line));
+                    }
+                    if let (Some(en), Some(ee), Some(eb)) = (err_name, err_expr, else_) {
+                        let else_end = eb.span.offset + eb.span.len;
+                        if en == name && span.offset <= offset && offset <= else_end {
+                            return Some((self.infer_expr(fd, ee, ee.span.offset), span.line));
+                        }
+                    }
+                }
+                Stmt::ForRange {
+                    name: n,
+                    body: b,
+                    span,
+                    ..
+                } if n == name && span.offset <= offset => {
+                    return Some(("int".to_string(), span.line));
+                }
+                Stmt::ForIn {
+                    name: n,
+                    name2,
+                    iter,
+                    body: b,
+                    span,
+                } if span.offset <= offset => {
+                    if n == name {
+                        let t = self.iter_elem_type(fd, iter, offset);
+                        return Some((t, span.line));
+                    }
+                    if name2.as_deref() == Some(name) {
+                        let it = self.infer_expr(fd, iter, iter.span.offset);
+                        let it = self.chase(fd, it, name, offset);
+                        let t = map_value(&it).unwrap_or_else(|| "str".to_string());
+                        return Some((t, span.line));
+                    }
+                    let _ = b;
+                }
+                _ => {}
+            }
+        }
+        best.map(|(t, l, _)| (t, l))
+    }
+
+    /// Infer the element type of a `for x in iter` loop for hover labels.
+    fn iter_elem_type(&self, fd: &FileData, iter: &Expr, offset: usize) -> String {
+        let t = self.infer_expr(fd, iter, iter.span.offset);
+        let t = self.chase(fd, t, "", offset);
+        if t == "bytes" {
+            return "int".to_string();
+        }
+        if t.starts_with("map[") {
+            if let Some(inner) = map_key(&t) {
+                return inner;
+            }
+            return "str".to_string();
+        }
+        if let Some(inner) = bracket_content(&t, "") {
+            return inner;
+        }
+        "str".to_string()
+    }
+
+    /// Best-effort expression type inference for hover labels.
+    fn infer_expr(&self, fd: &FileData, e: &Expr, offset: usize) -> String {
+        self.infer_inner(fd, e, offset, 0)
+    }
+
+    fn infer_inner(&self, fd: &FileData, e: &Expr, offset: usize, depth: u8) -> String {
+        if depth > 8 {
+            return "{unknown}".to_string();
+        }
+        let d = depth + 1;
+        match &e.kind {
+            ExprKind::Int { .. } => "int".to_string(),
+            ExprKind::Float(_) => "float".to_string(),
+            ExprKind::String(_) => "str".to_string(),
+            ExprKind::Bytes(_) => "bytes".to_string(),
+            ExprKind::Bool(_) => "bool".to_string(),
+            ExprKind::Ident(n) => n.clone(),
+            ExprKind::Binary { op, lhs, .. } if op == ".." || op == "..=" => {
+                let _ = lhs;
+                "[int]".to_string()
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                if op == "??" {
+                    let lt = self.infer_inner(fd, lhs, offset, d);
+                    let lt = self.chase(fd, lt, "", offset);
+                    return unwrap_single(&lt);
+                }
+                let lt = self.infer_inner(fd, lhs, offset, d);
+                let rt = self.infer_inner(fd, rhs, offset, d);
+                if op == "+" && (lt == "str" || rt == "str") {
+                    "str".to_string()
+                } else if matches!(
+                    op.as_str(),
+                    "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+                ) {
+                    "bool".to_string()
+                } else {
+                    lt
+                }
+            }
+            ExprKind::Unary { operand, .. } => self.infer_inner(fd, operand, offset, d),
+            ExprKind::List(items) => {
+                let inner = items
+                    .first()
+                    .map(|e| self.infer_inner(fd, e, offset, d))
+                    .unwrap_or_else(|| "int".to_string());
+                format!("[{inner}]")
+            }
+            ExprKind::Index { base, .. } => {
+                let bt = self.infer_inner(fd, base, offset, d);
+                let bt = self.chase(fd, bt, "", offset);
+                if bt == "str" || bt == "bytes" {
+                    "int".to_string()
+                } else if bt.starts_with("map[") {
+                    map_value(&bt).unwrap_or_else(|| "int".to_string())
+                } else if let Some(inner) = bracket_content(&bt, "") {
+                    inner
+                } else {
+                    "int".to_string()
+                }
+            }
+            ExprKind::Field { base, name } => {
+                let bt = self.infer_inner(fd, base, offset, d);
+                let bt = self.chase(fd, bt, "", offset);
+                if let Some(ft) = self.struct_field_type(&fd.package, generic_base(&bt), name) {
+                    return ft;
+                }
+                "field".to_string()
+            }
+            ExprKind::Call {
+                name: Some(n),
+                args,
+                ..
+            } => {
+                // `err_of(x)` yields the E of x's `result[T, E]`.
+                if n == "err_of" && args.len() == 1 {
+                    let at = self.infer_inner(fd, &args[0], offset, d);
+                    let at = self.chase(fd, at, "", offset);
+                    if let Some((_, err)) = result_parts(&at) {
+                        return err;
+                    }
+                    return "{unknown}".to_string();
+                }
+                if let Some((head, rest)) = n.split_once('.') {
+                    // Import-qualified `pkg.func` first ...
+                    if let Some(target) = self.imports.get(&(fd.package.clone(), head.to_string()))
+                    {
+                        if let Some(r) = self.func_return(target, rest) {
+                            return r;
+                        }
+                    }
+                    // ... else a method on a receiver value: `p.sum()`
+                    // keeps its dotted-call shape, so resolve it here.
+                    let rt = self
+                        .local_type(fd, head, offset)
+                        .map(|(t, _)| t)
+                        .unwrap_or_else(|| head.to_string());
+                    if let Some(r) = self.method_return(&fd.package, generic_base(&rt), rest) {
+                        return r;
+                    }
+                    return "{unknown}".to_string();
+                }
+                if let Some(r) = self.func_return(&fd.package, n) {
+                    return r;
+                }
+                "{unknown}".to_string()
+            }
+            ExprKind::Call { .. } => "{unknown}".to_string(),
+            ExprKind::MethodCall { recv, name, .. } => {
+                let rt = self.infer_inner(fd, recv, offset, d);
+                let rt = self.chase(fd, rt, "", offset);
+                if let Some(r) = self.method_return(&fd.package, generic_base(&rt), name) {
+                    return r;
+                }
+                "{unknown}".to_string()
+            }
+            ExprKind::Cast { ty, .. } => type_string(ty),
+            ExprKind::StructLit { tyname, .. } => tyname.clone(),
+            ExprKind::Spawn(call) => {
+                let inner = self.infer_inner(fd, call, offset, d);
+                if inner.starts_with('{') {
+                    return "{unknown}".to_string();
+                }
+                format!("join[{inner}]")
+            }
+            _ => "int".to_string(),
+        }
+    }
+
+    /// A plain function's declared return type (`()` for void).
+    fn func_return(&self, package: &str, name: &str) -> Option<String> {
+        self.funcs
+            .get(&(package.to_string(), name.to_string()))
+            .map(|f| f.ret.clone().unwrap_or_else(|| "()".to_string()))
+    }
+
+    /// A struct method's declared return type.
+    fn method_return(&self, package: &str, base: &str, method: &str) -> Option<String> {
+        self.methods
+            .get(&(package.to_string(), base.to_string(), method.to_string()))
+            .map(|f| f.ret.clone().unwrap_or_else(|| "()".to_string()))
+    }
+
+    /// A struct/enum field's declared type, file, and line. Enum variants
+    /// (recorded with an empty type) resolve to the enum itself.
+    fn struct_field_loc(
+        &self,
+        package: &str,
+        base: &str,
+        field: &str,
+    ) -> Option<(String, PathBuf, u32)> {
+        if let Some((pkg, ty)) = base.split_once('.') {
+            if let Some(s) = self.structs.get(&(pkg.to_string(), ty.to_string())) {
+                if let Some((_, ft, fl)) = s.fields.iter().find(|(n, _, _)| n == field) {
+                    let t = if ft.is_empty() {
+                        base.to_string()
+                    } else {
+                        ft.clone()
+                    };
+                    return Some((t, s.file.clone(), *fl));
+                }
+            }
+        }
+        self.structs
+            .get(&(package.to_string(), base.to_string()))
+            .and_then(|s| {
+                s.fields
+                    .iter()
+                    .find(|(n, _, _)| n == field)
+                    .map(|(_, ft, fl)| {
+                        let t = if ft.is_empty() {
+                            base.to_string()
+                        } else {
+                            ft.clone()
+                        };
+                        (t, s.file.clone(), *fl)
+                    })
+            })
+    }
+
+    /// A struct/enum field's declared type.
+    fn struct_field_type(&self, package: &str, base: &str, field: &str) -> Option<String> {
+        self.struct_field_loc(package, base, field)
+            .map(|(t, _, _)| t)
+    }
+
+    fn collect_hints(&self, fd: &FileData, body: &Block, out: &mut Vec<InlayHint>) {
+        for s in &body.stmts {
+            self.stmt_hints(fd, s, out);
+        }
+    }
+
+    fn stmt_hints(&self, fd: &FileData, s: &Stmt, out: &mut Vec<InlayHint>) {
         match s {
             Stmt::Let {
-                name: n,
+                name,
                 ty,
                 init,
                 span,
                 ..
-            } if n == name && span.offset <= offset => {
-                let ty = ty
-                    .as_ref()
-                    .map(type_string)
-                    .unwrap_or_else(|| infer_expr(file, init));
-                best = Some((ty, span.line, span.offset));
-            }
-            Stmt::ForRange {
-                name: n,
-                body: b,
-                span,
-                ..
-            } if n == name && span.offset <= offset => {
-                return Some(("int".to_string(), span.line));
-            }
-            Stmt::ForIn {
-                name: n,
-                name2,
-                iter,
-                body: b,
-                span,
-            } if span.offset <= offset => {
-                if n == name {
-                    let t = iter_elem_type(file, iter);
-                    return Some((t, span.line));
+            } if ty.is_none() => {
+                let label = self.infer_expr(fd, init, init.span.offset);
+                if is_concrete_hint(&label, init) {
+                    out.push(InlayHint {
+                        offset: span.offset + 4 + name.len(),
+                        label: format!(": {label}"),
+                    });
                 }
-                if name2.as_deref() == Some(name) {
-                    return Some(("str".to_string(), span.line));
+            }
+            Stmt::If { then, else_, .. } => {
+                self.collect_hints(fd, then, out);
+                if let Some(Else::Block(b)) = else_ {
+                    self.collect_hints(fd, b, out);
                 }
-                let _ = b;
+            }
+            Stmt::While { body, .. }
+            | Stmt::ForRange { body, .. }
+            | Stmt::ForIn { body, .. }
+            | Stmt::Unsafe { body, .. } => {
+                self.collect_hints(fd, body, out);
+            }
+            Stmt::GuardLet { body, .. } => self.collect_hints(fd, body, out),
+            Stmt::IfLet { then, else_, .. } => {
+                self.collect_hints(fd, then, out);
+                if let Some(b) = else_ {
+                    self.collect_hints(fd, b, out);
+                }
+            }
+            Stmt::Select { cases, default, .. } => {
+                for c in cases {
+                    self.collect_hints(fd, &c.body, out);
+                }
+                if let Some(d) = default {
+                    self.collect_hints(fd, d, out);
+                }
+            }
+            Stmt::Switch { cases, default, .. } => {
+                for c in cases {
+                    if let SwitchBody::Block(b) = &c.body {
+                        self.collect_hints(fd, b, out);
+                    }
+                }
+                if let Some(d) = default {
+                    self.collect_hints(fd, d, out);
+                }
             }
             _ => {}
         }
     }
-    best.map(|(t, l, _)| (t, l))
 }
 
-/// Infer the element type of a `for x in iter` loop for hover labels.
-fn iter_elem_type(file: &File, iter: &Expr) -> String {
-    let t = infer_expr(file, iter);
-    if let Some(inner) = t.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-        return inner.to_string();
+/// True for a plain `name` (possibly `pkg.Name`): something a `let`-chain
+/// can resolve through, as opposed to a rendered container type.
+fn is_bare_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// `opt[T]` / `result[T, E]` project to `T`: what `guard let` binds.
+fn unwrap_single(ty: &str) -> String {
+    if let Some(inner) = bracket_content(ty, "opt") {
+        return inner;
     }
-    if t == "bytes" {
-        return "int".to_string();
+    if let Some((ok, _)) = result_parts(ty) {
+        return ok;
     }
-    "str".to_string()
+    ty.to_string()
 }
 
-/// Receiver type for `head.rest`: the local `head`'s inferred type.
-fn receiver_type(fd: &FileData, head: &str, offset: usize) -> Option<String> {
-    local_type(fd, head, offset).map(|(t, _)| t)
-}
-
-/// Best-effort expression type inference for hover labels.
-fn infer_expr(_file: &File, e: &Expr) -> String {
-    match &e.kind {
-        ExprKind::Int { .. } => "int".to_string(),
-        ExprKind::Float(_) => "float".to_string(),
-        ExprKind::String(_) => "str".to_string(),
-        ExprKind::Bytes(_) => "bytes".to_string(),
-        ExprKind::Bool(_) => "bool".to_string(),
-        ExprKind::Ident(n) => n.clone(),
-        ExprKind::Binary { op, lhs, .. } if op == ".." || op == "..=" => {
-            let _ = lhs;
-            "[int]".to_string()
-        }
-        ExprKind::Binary { op, lhs, rhs } => {
-            let lt = infer_expr(_file, lhs);
-            let rt = infer_expr(_file, rhs);
-            if op == "+" && (lt == "str" || rt == "str") {
-                "str".to_string()
-            } else if matches!(
-                op.as_str(),
-                "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
-            ) {
-                "bool".to_string()
-            } else {
-                lt
+/// Contents of the first top-level `[...]`, optionally after a `head`
+/// prefix (`opt`, or `""` for a bare `[T]`).
+fn bracket_content(ty: &str, head: &str) -> Option<String> {
+    let mut rest = ty.strip_prefix(head)?.strip_prefix('[')?;
+    let _ = &mut rest;
+    let mut depth = 0;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                if depth == 0 {
+                    return Some(rest[..i].to_string());
+                }
+                depth -= 1;
             }
+            _ => {}
         }
-        ExprKind::Unary { operand, .. } => infer_expr(_file, operand),
-        ExprKind::List(items) => {
-            let inner = items
-                .first()
-                .map(|e| infer_expr(_file, e))
-                .unwrap_or_else(|| "int".to_string());
-            format!("[{inner}]")
-        }
-        ExprKind::Index { base, .. } => {
-            let bt = infer_expr(_file, base);
-            if bt == "str" || bt == "bytes" {
-                "int".to_string()
-            } else if let Some(inner) = bt.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-                inner.to_string()
-            } else {
-                "int".to_string()
-            }
-        }
-        ExprKind::Field { .. } => "field".to_string(),
-        ExprKind::Call { .. } => "call".to_string(),
-        ExprKind::Cast { ty, .. } => type_string(ty),
-        ExprKind::StructLit { tyname, .. } => tyname.clone(),
-        _ => "int".to_string(),
     }
+    None
+}
+
+/// Split `result[OK, ERR]` into its two sides at the top-level comma.
+fn result_parts(ty: &str) -> Option<(String, String)> {
+    let rest = ty.strip_prefix("result")?.strip_prefix('[')?;
+    let mut depth = 0;
+    let mut comma = None;
+    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 && comma.is_none() => comma = Some(i),
+            _ => {}
+        }
+    }
+    let (c, e) = (comma?, end?);
+    Some((
+        rest[..c].trim().to_string(),
+        rest[c + 1..e].trim().to_string(),
+    ))
+}
+
+/// Value side of `map[K]V`.
+fn map_value(ty: &str) -> Option<String> {
+    let rest = ty.strip_prefix("map")?.strip_prefix('[')?;
+    let mut depth = 0;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' if depth == 0 => return Some(rest[i + 1..].trim().to_string()),
+            ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Key side of `map[K]V`.
+fn map_key(ty: &str) -> Option<String> {
+    let rest = ty.strip_prefix("map")?.strip_prefix('[')?;
+    let mut depth = 0;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' if depth == 0 => return Some(rest[..i].trim().to_string()),
+            ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Strip generic arguments and borrow/box prefixes: `Box[int]` -> `Box`,
+/// `&mut link` -> `link`. Used before method/struct table lookups.
+fn generic_base(ty: &str) -> &str {
+    let t = ty
+        .trim_start_matches('&')
+        .trim_start_matches("mut ")
+        .trim_start_matches("own ")
+        .trim_start_matches("gc ")
+        .trim_start_matches('*');
+    t.split('[').next().unwrap_or(t)
 }
 
 fn fn_end(f: &slang_syntax::FnDecl) -> usize {
@@ -946,39 +1425,55 @@ fn fn_end(f: &slang_syntax::FnDecl) -> usize {
         .unwrap_or(f.span.offset + f.span.len)
 }
 
-/// Reconstruct `pkg.name` / `recv.method` around an identifier at `offset`.
+/// Reconstruct the dotted path around the cursor: every `.ident`
+/// segment to the left, plus segments to the right only up to the
+/// cursor's own segment. Hovering `c` in `c.config.database` names `c`;
+/// hovering `database` names the whole chain.
 fn qualified_at(src: &str, offset: usize, _name: &str) -> String {
     let b = src.as_bytes();
-    // Normalize to full identifier bounds around the cursor first: the
-    // offset may sit anywhere inside the token, not just at its start.
-    let mut start = offset.min(src.len());
+    let len = src.len();
+    let mut start = offset.min(len);
     while start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_') {
         start -= 1;
     }
-    let mut end = offset.min(src.len());
-    while end < src.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
+    let mut end = offset.min(len);
+    while end < len && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
         end += 1;
     }
-    let head = &src[start..end];
-    // Cursor on the head of `head.tail`: extend right.
-    if b.get(end) == Some(&b'.') {
-        let mut t = end + 1;
-        while t < src.len() && (b[t].is_ascii_alphanumeric() || b[t] == b'_') {
-            t += 1;
-        }
-        if t > end + 1 {
-            return format!("{}.{}", head, &src[end + 1..t]);
+    // Extend left over every `.ident` segment (`c.config.database`).
+    let mut full_start = start;
+    loop {
+        if full_start >= 1 && b.get(full_start - 1) == Some(&b'.') {
+            let mut h = full_start - 1;
+            while h > 0 && (b[h - 1].is_ascii_alphanumeric() || b[h - 1] == b'_') {
+                h -= 1;
+            }
+            if h == full_start - 1 {
+                break; // lone dot (after a call, a range, ..): stop here.
+            }
+            full_start = h;
+        } else {
+            break;
         }
     }
-    // Cursor on the tail of `head.tail`: extend left.
-    if start >= 1 && b.get(start - 1) == Some(&b'.') {
-        let mut h = start - 1;
-        while h > 0 && (b[h - 1].is_ascii_alphanumeric() || b[h - 1] == b'_') {
-            h -= 1;
+    // Extend right only past segments the cursor has passed: the path
+    // names everything up to and including the cursor's own segment.
+    let mut full_end = end;
+    loop {
+        if b.get(full_end) == Some(&b'.') {
+            let mut t = full_end + 1;
+            while t < len && (b[t].is_ascii_alphanumeric() || b[t] == b'_') {
+                t += 1;
+            }
+            if t == full_end + 1 || offset < full_end + 1 {
+                break;
+            }
+            full_end = t;
+        } else {
+            break;
         }
-        return format!("{}.{}", &src[h..start - 1], head);
     }
-    head.to_string()
+    src[full_start..full_end].to_string()
 }
 
 #[cfg(test)]
@@ -1045,5 +1540,106 @@ mod tests {
         let off = src.find("p.sum").unwrap() + 2;
         let h = d.hover(&PathBuf::from("main.sl"), off).unwrap();
         assert!(h.ty.contains("sum"));
+    }
+}
+
+#[cfg(test)]
+mod hover_regression_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const WIRE: &str = r#"gc struct Conn {
+    config: Config,
+    lock: mutex,
+}
+
+gc struct Config {
+    database: str,
+}
+
+gc struct Document {
+    fields: [Field],
+}
+
+fn mongo_add_database(source: Document, database: str) -> result[Document, str] {
+    return ok(source);
+}
+
+pub fn command_on(c: Conn, database: str, body: Document, deadline: until)
+    -> result[Document, str] {
+    mutex_lock(c.lock);
+    let command_result = mongo_command_locked(c, database, body, deadline);
+    mutex_unlock(c.lock);
+    return command_result;
+}
+
+fn mongo_command_locked(c: Conn, database: str, body: Document, deadline: until)
+    -> result[Document, str] {
+    let dbname = c.config.database;
+    let prepared = mongo_add_database(body, database);
+    guard let command_body = prepared else let e = err_of(prepared) {
+        return err(e);
+    }
+    return ok(command_body);
+}
+"#;
+
+    fn db() -> (Db, PathBuf) {
+        let path = PathBuf::from("wire.sl");
+        let d = Db::load_single("mongo", &path, WIRE).unwrap();
+        (d, path)
+    }
+
+    #[test]
+    fn should_infer_call_return_for_let() {
+        let (d, path) = db();
+        let off = WIRE.find("let prepared").unwrap() + 4;
+        let h = d.hover(&path, off).unwrap();
+        assert_eq!(h.ty, "result[Document, str]");
+    }
+
+    #[test]
+    fn should_unwrap_guard_let_binding() {
+        let (d, path) = db();
+        let off = WIRE.find("guard let command_body").unwrap() + 10;
+        let h = d.hover(&path, off).unwrap();
+        assert_eq!(h.ty, "Document");
+        // use site later in the function resolves too
+        let use_off = WIRE.find("return ok(command_body)").unwrap() + 13;
+        let h2 = d.hover(&path, use_off).unwrap();
+        assert_eq!(h2.ty, "Document");
+    }
+
+    #[test]
+    fn should_type_err_of_binding_as_str() {
+        let (d, path) = db();
+        let off = WIRE.find("let e = err_of").unwrap() + 4;
+        let h = d.hover(&path, off).unwrap();
+        assert_eq!(h.ty, "str");
+    }
+
+    #[test]
+    fn should_walk_field_chain() {
+        let (d, path) = db();
+        let off = WIRE.find("c.lock").unwrap() + 2;
+        let h = d.hover(&path, off).unwrap();
+        assert_eq!(h.ty, "mutex");
+        // two-level chain: c.config.database
+        let off2 = WIRE.find("c.config.database").unwrap() + 11;
+        let h2 = d.hover(&path, off2).unwrap();
+        assert_eq!(h2.ty, "str");
+    }
+
+    #[test]
+    fn should_resolve_same_file_call() {
+        let (d, path) = db();
+        let src2 =
+            "fn a() -> int {\n    return b(1);\n}\nfn b(x: int) -> int {\n    return x;\n}\n";
+        let d2 = Db::load_single("m", &PathBuf::from("m.sl"), src2).unwrap();
+        let off = src2.find("b(1)").unwrap();
+        let h = d2.hover(&PathBuf::from("m.sl"), off).unwrap();
+        assert!(h.ty.contains("fn b"), "got {}", h.ty);
+        let _ = d;
+        let _ = path;
     }
 }
