@@ -92,6 +92,7 @@ def main():
         "    pub ret: Option<&'static str>,",
         "}",
         "",
+        "#[rustfmt::skip]",
         "pub static NATIVE_SIGS: &[NativeSig] = &[",
     ]
     for pkg, name, params, ret in rows:
@@ -106,9 +107,7 @@ def main():
         "",
         "/// Look up a native-package function, like native.c find_any_sig.",
         "pub fn native_sig(pkg: &str, name: &str) -> Option<&'static NativeSig> {",
-        "    NATIVE_SIGS",
-        "        .iter()",
-        "        .find(|s| s.pkg == pkg && s.name == name)",
+        "    NATIVE_SIGS.iter().find(|s| s.pkg == pkg && s.name == name)",
         "}",
         "",
     ]

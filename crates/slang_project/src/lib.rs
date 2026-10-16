@@ -308,9 +308,7 @@ pub fn apply_lock(project: &mut SlProject, src: &str) -> Result<(), ProjectError
                     if pin.git != *g || pin.tag != *t || pin.dir != dir {
                         return Err(ProjectError {
                             line: line_no,
-                            message: format!(
-                                "lock for '{name}' disagrees with slang.project"
-                            ),
+                            message: format!("lock for '{name}' disagrees with slang.project"),
                         });
                     }
                 }
@@ -322,9 +320,7 @@ pub fn apply_lock(project: &mut SlProject, src: &str) -> Result<(), ProjectError
                     _ => {
                         return Err(ProjectError {
                             line: line_no,
-                            message: format!(
-                                "lock entry '{name}' is not in slang.project"
-                            ),
+                            message: format!("lock entry '{name}' is not in slang.project"),
                         })
                     }
                 };
@@ -355,9 +351,9 @@ impl SlProject {
     /// True when `rel` (a repository-relative path with `/` separators)
     /// falls under one of this manifest's `exclude` dirs.
     pub fn is_excluded(&self, rel: &str) -> bool {
-        self.excludes.iter().any(|ex| {
-            rel == ex || rel.starts_with(&format!("{ex}/"))
-        })
+        self.excludes
+            .iter()
+            .any(|ex| rel == ex || rel.starts_with(&format!("{ex}/")))
     }
 }
 
@@ -458,7 +454,11 @@ mod tests {
     #[test]
     fn should_reject_lock_for_unknown_pin() {
         let mut p = parse_project("name a\nversion 0.1.0\n").unwrap();
-        assert!(apply_lock(&mut p, "ghost sha256:0000000000000000000000000000000000000000000000000000000000000000\n").is_err());
+        assert!(apply_lock(
+            &mut p,
+            "ghost sha256:0000000000000000000000000000000000000000000000000000000000000000\n"
+        )
+        .is_err());
     }
 
     #[test]

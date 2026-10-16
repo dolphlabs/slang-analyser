@@ -13,6 +13,7 @@ pub struct NativeSig {
     pub ret: Option<&'static str>,
 }
 
+#[rustfmt::skip]
 pub static NATIVE_SIGS: &[NativeSig] = &[
     NativeSig { pkg: "compress", name: "gzip", params: &["bytes"], ret: Some("result[bytes,str]") },
     NativeSig { pkg: "compress", name: "gzip_level", params: &["bytes", "int"], ret: Some("result[bytes,str]") },
@@ -176,7 +177,5 @@ pub static NATIVE_SIGS: &[NativeSig] = &[
 
 /// Look up a native-package function, like native.c find_any_sig.
 pub fn native_sig(pkg: &str, name: &str) -> Option<&'static NativeSig> {
-    NATIVE_SIGS
-        .iter()
-        .find(|s| s.pkg == pkg && s.name == name)
+    NATIVE_SIGS.iter().find(|s| s.pkg == pkg && s.name == name)
 }

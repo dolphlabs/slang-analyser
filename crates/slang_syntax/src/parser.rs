@@ -1646,7 +1646,7 @@ impl Parser {
     fn struct_tyname_ahead(&self) -> bool {
         let toks = &self.toks;
         let mut i = self.pos + 1; // token after the leading Ident
-        // dotted members: `.Name`
+                                  // dotted members: `.Name`
         loop {
             if toks.get(i).map(|t| t.kind) != Some(TokenKind::Dot) {
                 break;
@@ -1684,14 +1684,8 @@ impl Parser {
         }
         // struct-literal opening: `{` Ident `:`.
         matches!(toks.get(i).map(|t| t.kind), Some(TokenKind::LBrace))
-            && matches!(
-                toks.get(i + 1).map(|t| t.kind),
-                Some(TokenKind::Ident)
-            )
-            && matches!(
-                toks.get(i + 2).map(|t| t.kind),
-                Some(TokenKind::Colon)
-            )
+            && matches!(toks.get(i + 1).map(|t| t.kind), Some(TokenKind::Ident))
+            && matches!(toks.get(i + 2).map(|t| t.kind), Some(TokenKind::Colon))
     }
 
     /// Parse `[A, B]` type arguments, returning them as `[A, B]` text.
