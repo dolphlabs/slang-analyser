@@ -1300,18 +1300,21 @@ impl Parser {
                 },
             });
         }
-        // `&x` / `&mut x` borrow expressions are prefix-only.
-        if self.at(TokenKind::Amp) {
-            let start = self.bump().span;
-            if self.at(TokenKind::KwMut) {
+        // Borrow expressions and dereference are prefix-only.
+        // Mirrors the T_AMP and T_STAR arms of slang parse_unary.
+        if self.at(TokenKind::Amp) || self.at(TokenKind::Star) {
+            let start = self.bump();
+            let mut op = op_text(start.kind).to_string();
+            if start.kind == TokenKind::Amp && self.at(TokenKind::KwMut) {
                 self.bump();
+                op = "&mut".to_string();
             }
             let operand = self.parse_unary()?;
-            let span = span_between(start, operand.span);
+            let span = span_between(start.span, operand.span);
             return Some(Expr {
                 span,
                 kind: ExprKind::Unary {
-                    op: "&".to_string(),
+                    op,
                     operand: Box::new(operand),
                 },
             });
@@ -1560,11 +1563,31 @@ impl Parser {
             }
             TokenKind::LBrace => self.parse_map_lit(),
             TokenKind::Ident => {
-                // `Name { ... }` struct literal vs plain identifier.
-                // Guard the heuristic: `switch code { ... }` must not
-                // treat the switch body as struct fields.
-                if self.peek2_kind() == TokenKind::LBrace && self.looks_like_struct_lit() {
-                    return self.parse_struct_lit();
+                // Struct-literal type reference: `Name[.Member]*[[args]]`
+                // followed by `{ f: ... }`. Scan ahead first so plain
+                // idents, field access, and indexing are untouched when
+                // the struct-literal opening is absent (mirrors
+                // generic_literal_ahead + the 'ident {' test in slang's
+                // parser.c).
+                if self.struct_tyname_ahead() {
+                    let span = t.span;
+                    let mut full = self.bump().text.unwrap_or_default();
+                    while self.at(TokenKind::Dot) {
+                        self.bump();
+                        // Member shape mirrors the scanner above: Ident,
+                        // keyword, or type name (e.g. `httpc.Request`).
+                        let mk = self.peek_kind();
+                        if mk == TokenKind::Ident || mk.is_keyword() || mk.is_type_name() {
+                            full.push('.');
+                            full.push_str(&self.bump().text.unwrap_or_default());
+                        } else {
+                            break;
+                        }
+                    }
+                    if self.at(TokenKind::LBracket) {
+                        full.push_str(&self.parse_type_arg_list()?);
+                    }
+                    return self.parse_struct_lit_named(full, span);
                 }
                 self.bump();
                 Some(Expr {
@@ -1614,27 +1637,79 @@ impl Parser {
         }
     }
 
-    /// True when `Ident {` starts a struct literal (`Name { f: v, ... }`).
-    /// Only the colon form counts: the language's struct literals are
-    /// `field: value` (see `EX_STRUCTLIT` in `src/ast.h`), so an `if`/`while`
-    /// body opening with an assignment (`if ok { x = 1; }`) is never one.
-    /// An empty `{}` is not claimed either, so `if b {}` keeps its body.
-    fn looks_like_struct_lit(&self) -> bool {
-        // self.pos is at the Ident; +1 is `{`.
-        let after = match self.toks.get(self.pos + 2) {
-            Some(t) => t,
-            None => return false,
-        };
-        // Field names may be keywords (`x.map:`), so accept those too.
-        let is_name =
-            after.kind == TokenKind::Ident || after.kind.is_keyword() || after.kind.is_type_name();
-        if !is_name {
-            return false;
+    /// True when the tokens at the cursor form a struct-literal type
+    /// reference: `Name[.Member]*[[type args]] { field:`.
+    /// Mirrors generic_literal_ahead + the 'ident {' test in slang's
+    /// parser.c: brackets must match (nesting `[]` and `()`), and the
+    /// brace must open `field:`. A block after an index or condition
+    /// never satisfies this.
+    fn struct_tyname_ahead(&self) -> bool {
+        let toks = &self.toks;
+        let mut i = self.pos + 1; // token after the leading Ident
+        // dotted members: `.Name`
+        loop {
+            if toks.get(i).map(|t| t.kind) != Some(TokenKind::Dot) {
+                break;
+            }
+            match toks.get(i + 1).map(|t| t.kind) {
+                Some(TokenKind::Ident) => {}
+                Some(k) if k.is_keyword() || k.is_type_name() => {}
+                _ => return false,
+            }
+            i += 2;
         }
-        matches!(
-            self.toks.get(self.pos + 3).map(|t| t.kind),
-            Some(TokenKind::Colon)
-        )
+        // optional `[type args]`: scan to the matching `]`.
+        if toks.get(i).map(|t| t.kind) == Some(TokenKind::LBracket) {
+            let mut depth = 0u32;
+            let mut j = i;
+            loop {
+                let Some(t) = toks.get(j) else {
+                    return false;
+                };
+                match t.kind {
+                    TokenKind::LBracket | TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => depth = depth.saturating_sub(1),
+                    TokenKind::RBracket => {
+                        if depth <= 1 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    TokenKind::Eof => return false,
+                    _ => {}
+                }
+                j += 1;
+            }
+            i = j + 1; // token after the matching `]`
+        }
+        // struct-literal opening: `{` Ident `:`.
+        matches!(toks.get(i).map(|t| t.kind), Some(TokenKind::LBrace))
+            && matches!(
+                toks.get(i + 1).map(|t| t.kind),
+                Some(TokenKind::Ident)
+            )
+            && matches!(
+                toks.get(i + 2).map(|t| t.kind),
+                Some(TokenKind::Colon)
+            )
+    }
+
+    /// Parse `[A, B]` type arguments, returning them as `[A, B]` text.
+    /// The caller must have established the brackets via
+    /// struct_tyname_ahead.
+    fn parse_type_arg_list(&mut self) -> Option<String> {
+        self.expect(TokenKind::LBracket, "'['")?;
+        let mut args = Vec::new();
+        while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
+            args.push(type_to_string(&self.parse_type()?));
+            if self.at(TokenKind::Comma) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        self.expect(TokenKind::RBracket, "']'")?;
+        Some(format!("[{}]", args.join(", ")))
     }
 
     fn parse_map_lit(&mut self) -> Option<Expr> {
@@ -1657,12 +1732,6 @@ impl Parser {
             span: span_between(start, end),
             kind: ExprKind::MapLit(pairs),
         })
-    }
-
-    fn parse_struct_lit(&mut self) -> Option<Expr> {
-        let t = self.bump(); // Name
-        let name = t.text.unwrap_or_default();
-        self.parse_struct_lit_named(name, t.span)
     }
 
     fn parse_struct_lit_named(&mut self, tyname: String, nspan: Span) -> Option<Expr> {

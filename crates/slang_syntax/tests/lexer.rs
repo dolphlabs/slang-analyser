@@ -53,3 +53,13 @@ fn should_skip_line_comments() {
     assert_eq!(toks[0].kind, TokenKind::KwLet);
     assert_eq!(toks[0].span.line, 2);
 }
+
+#[test]
+fn should_lex_reserved_type_words_as_idents() {
+    // wire, until, fault, peer, trip are never produced by slang's lexer
+    // (only token_type_name knows them), so they must lex as Ident and
+    // stay usable as variable names.
+    let toks = lex("let peer = 1; let wire = peer;").unwrap();
+    assert!(toks.iter().filter(|t| t.kind == TokenKind::Ident).count() >= 3);
+    assert!(!toks.iter().any(|t| t.kind == TokenKind::TyPeer));
+}

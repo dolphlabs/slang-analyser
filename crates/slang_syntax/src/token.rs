@@ -59,6 +59,9 @@ pub enum TokenKind {
     TyDuration,
     TyRawptr,
     TyArena,
+    // Reserved but never produced by the lexer, mirroring upstream:
+    // slang's lexer.h declares T_TY_WIRE/_UNTIL/_FAULT/_PEER/_TRIP yet
+    // only token_type_name references them. See keyword_kind.
     TyWire,
     TyUntil,
     TyFault,
@@ -306,9 +309,16 @@ impl TokenKind {
 }
 
 /// Map identifier text to a keyword / type-name kind, if any.
-/// Mirrors the `KW(...)` table in `src/lexer.c`, plus the extra
-/// `TokenType` names (`wire`, `until`, `fault`, `peer`, `trip`, `link`)
-/// that `token_type_name` knows about.
+/// Mirrors exactly the `KW(...)` table in `src/lexer.c`.
+///
+/// NOTE: `wire`, `until`, `fault`, `peer`, and `trip` are deliberately
+/// absent here even though `TokenKind` has variants for them (and slang's
+/// `lexer.h` declares the `T_TY_*` enumerants): upstream's lexer never
+/// produces those tokens — only `token_type_name` knows their spellings —
+/// so in real code they lex as plain identifiers and may even name
+/// variables (e.g. lipo's `peer.allow_dms`). The parser accepts them as
+/// named types through the ordinary `Ident` path, exactly like slang's
+/// `parse_type` does via `ty_named`.
 pub fn keyword_kind(text: &str) -> Option<TokenKind> {
     Some(match text {
         "let" => TokenKind::KwLet,
@@ -361,11 +371,6 @@ pub fn keyword_kind(text: &str) -> Option<TokenKind> {
         "duration" => TokenKind::TyDuration,
         "rawptr" => TokenKind::TyRawptr,
         "arena" => TokenKind::TyArena,
-        "wire" => TokenKind::TyWire,
-        "until" => TokenKind::TyUntil,
-        "fault" => TokenKind::TyFault,
-        "peer" => TokenKind::TyPeer,
-        "trip" => TokenKind::TyTrip,
         "chan" => TokenKind::TyChan,
         "join" => TokenKind::TyJoin,
         // `link` is both a directive keyword and a type name depending on

@@ -107,3 +107,27 @@ fn should_parse_borrow_link_wire_until_types() {
     let f = parse_src("fn read_frame(c: &mut link, buf: wire, d: until) -> result[int, str] {\n    return ok(1);\n}\n");
     assert_eq!(f.items.len(), 1);
 }
+
+#[test]
+fn should_parse_generic_struct_literal_as_call_arg() {
+    let f = parse_src("fn f() {\n    push(q, Job[S] { name: n, done: false });\n}\n");
+    assert_eq!(f.items.len(), 1);
+}
+
+#[test]
+fn should_parse_dotted_struct_literal() {
+    let f = parse_src("fn f() {\n    return ok(httpc.Request { method: m, url: u });\n}\n");
+    assert_eq!(f.items.len(), 1);
+}
+
+#[test]
+fn should_parse_deref_and_borrow_mut() {
+    let f = parse_src("fn f(c: Conn) {\n    send(&mut *c);\n}\n");
+    assert_eq!(f.items.len(), 1);
+}
+
+#[test]
+fn should_parse_field_access_before_block() {
+    let f = parse_src("fn f() {\n    if !peer.allow_dms {\n        return 1;\n    }\n}\n");
+    assert_eq!(f.items.len(), 1);
+}
