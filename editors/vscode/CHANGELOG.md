@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Imports resolve like the compiler: local dirs, native packages (158
+  signatures with hover + return-type inference), stdlib sources, and
+  `slang.project` pins from the package cache — so `zokor.*`, `pg.*`,
+  `json.*` and friends now hover, complete chains, and infer.
+- `slang.project` gains `exclude` dirs and `slang.lock` hashes, mirroring
+  the compiler's manifest handling.
+- Parser: generic/dotted struct literals (`ScheduledJob[S] { ... }`,
+  `httpc.Request { ... }`), pointer dereference (`*p`), and `peer`/`wire`/
+  `until`/`fault`/`trip` lex as identifiers exactly like upstream.
+- Faster rebuilds on every keystroke (docs are cached per file).
+
 ## 0.1.7
 
 - Hover now infers call return types, struct field walks (`c.config.database`),

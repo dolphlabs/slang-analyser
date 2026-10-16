@@ -8,15 +8,18 @@
 //! scalars, `[T]`, `map[K]V`, `opt[T]`, `result[T, E]`, structs, and
 //! function signatures.
 
+use slang_project::{self, SlProject};
 use slang_syntax::{
     lex_with_comments, parse, Block, Else, Expr, ExprKind, File, Item, Stmt, SwitchBody, Type,
     TypeKind,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 mod native_sigs_generated;
+mod resolve;
 use native_sigs_generated::native_sig;
+use resolve::find_stdlib;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileId(usize);
@@ -27,6 +30,7 @@ struct FileData {
     package: String,
     src: String,
     file: File,
+    docs: HashMap<u32, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,12 +115,20 @@ pub struct Db {
     /// their recovered AST: one unknown construct must never blind the
     /// whole workspace. Only unreadable/unlexable files are skipped.
     file_errors: HashMap<PathBuf, Vec<slang_syntax::ParseError>>,
+    /// Workspace root (the `slang.project` directory, or the scan root).
+    root: PathBuf,
+    /// Parsed manifest, when the root has a readable `slang.project`.
+    project: Option<SlProject>,
+    /// Resolved stdlib root for slang-source packages, if found.
+    stdlib: Option<PathBuf>,
 }
 
 impl Db {
     /// Load a workspace rooted at `root` (must contain `slang.project`).
     /// Reads `*.sl` files excluding `*_test.sl`, like a normal build.
     pub fn load(root: &Path) -> Result<Self, String> {
+        let project = slang_project::load(root).ok();
+        let stdlib = find_stdlib();
         let mut db = Db {
             files: Vec::new(),
             file_index: HashMap::new(),
@@ -126,56 +138,172 @@ impl Db {
             imports: HashMap::new(),
             consts: HashMap::new(),
             file_errors: HashMap::new(),
+            root: root.to_path_buf(),
+            project,
+            stdlib,
         };
+        // Phase 1: workspace files, minus excluded dirs and test files.
         let mut sl_files = Vec::new();
         collect_sl_files(root, &mut sl_files)
             .map_err(|e| format!("cannot scan {}: {e}", root.display()))?;
         sl_files.sort();
         for path in sl_files {
+            if db.is_excluded(&path) {
+                continue;
+            }
             let src = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let package = package_of(root, &path);
-            let (toks, comments) = match lex_with_comments(&src) {
-                Ok(v) => v,
-                // Unlexable files are skipped but recorded; the rest of
-                // the workspace still indexes.
-                Err(e) => {
-                    db.file_errors.insert(
-                        path.clone(),
-                        vec![slang_syntax::ParseError {
-                            line: e.line,
-                            offset: e.offset,
-                            message: e.message,
-                        }],
-                    );
-                    continue;
-                }
-            };
-            let (file, errors) = parse(toks);
-            if !errors.is_empty() {
-                db.file_errors.insert(path.clone(), errors);
-            }
-            let docs = attach_docs(&comments, &file);
-            let fd = FileData {
-                path: path.clone(),
-                package,
-                src,
-                file,
-            };
-            let fid = FileId(db.files.len());
-            db.file_index.insert(path.clone(), fid);
-            db.record_imports(&fd);
-            db.index_file_symbols(&fd, &docs);
-            db.files.push(fd);
+            db.ingest_file(path, package, src);
         }
+        // Phase 2: follow imports into external package dirs.
+        db.resolve_all_imports();
         Ok(db)
     }
 
+    /// True when `path` falls under one of the manifest's `exclude` dirs.
+    fn is_excluded(&self, path: &Path) -> bool {
+        let Some(proj) = self.project.as_ref() else {
+            return false;
+        };
+        let Some(rel) = path.strip_prefix(&self.root).ok().and_then(|r| r.to_str()) else {
+            return false;
+        };
+        proj.is_excluded(&rel.replace('\\', "/"))
+    }
+
+    /// Parse + index one buffer under an explicit package name.
+    /// Unlexable files are recorded and skipped; files with parse errors
+    /// still index from their recovered AST.
+    fn ingest_file(&mut self, path: PathBuf, package: String, src: String) {
+        if self.file_index.contains_key(&path) {
+            return;
+        }
+        let (toks, comments) = match lex_with_comments(&src) {
+            Ok(v) => v,
+            Err(e) => {
+                self.file_errors.insert(
+                    path.clone(),
+                    vec![slang_syntax::ParseError {
+                        line: e.line,
+                        offset: e.offset,
+                        message: e.message,
+                    }],
+                );
+                return;
+            }
+        };
+        let (file, errors) = parse(toks);
+        if !errors.is_empty() {
+            self.file_errors.insert(path.clone(), errors);
+        }
+        let docs = attach_docs(&comments, &file);
+        let fd = FileData {
+            path: path.clone(),
+            package,
+            src,
+            file,
+            docs,
+        };
+        let fid = FileId(self.files.len());
+        self.file_index.insert(path, fid);
+        self.index_file_symbols(&fd, &fd.docs);
+        self.files.push(fd);
+    }
+
+    /// Follow every import of every known file into external package dirs
+    /// (stdlib source, pinned cache), transitively. Already-indexed
+    /// directories are not reloaded; import cycles terminate on the
+    /// visited set (upstream would refuse them — the IDE stays lenient).
+    /// Import bindings are (re)recorded here from resolution results.
+    fn resolve_all_imports(&mut self) {
+        use resolve::{canon, package_files, ImportResolver, ResolvedImport};
+        let resolver = ImportResolver {
+            project: self.project.clone(),
+            stdlib: self.stdlib.clone(),
+            cache_pkg: slang_project::cache_root().map(|c| c.join("pkg")),
+        };
+        let mut visited: HashSet<PathBuf> = self
+            .files
+            .iter()
+            .filter_map(|fd| fd.path.parent().map(canon))
+            .collect();
+        // (file index, import path, alias): indices stay valid because
+        // files are only ever pushed, never removed or reordered.
+        let mut queue: Vec<(usize, String, Option<String>)> = Vec::new();
+        for (idx, fd) in self.files.iter().enumerate() {
+            for item in &fd.file.items {
+                if let Item::Import {
+                    path: ip, alias, ..
+                } = item
+                {
+                    queue.push((idx, ip.clone(), alias.clone()));
+                }
+            }
+        }
+        while let Some((idx, ipath, alias)) = queue.pop() {
+            let (from_dir, req_pkg) = {
+                let fd = &self.files[idx];
+                (
+                    fd.path
+                        .parent()
+                        .map(|d| d.to_path_buf())
+                        .unwrap_or_default(),
+                    fd.package.clone(),
+                )
+            };
+            let bind = alias.unwrap_or_else(|| import_target(&ipath));
+            match resolver.resolve(&from_dir, &ipath) {
+                ResolvedImport::Dir { dir, package } => {
+                    self.imports
+                        .entry((req_pkg, bind))
+                        .or_insert(package.clone());
+                    if visited.insert(canon(&dir)) {
+                        for p in package_files(&dir) {
+                            let Ok(src) = std::fs::read_to_string(&p) else {
+                                continue;
+                            };
+                            let before = self.files.len();
+                            self.ingest_file(p, package.clone(), src);
+                            if self.files.len() == before {
+                                // Duplicate path or unlexable buffer:
+                                // nothing new to follow.
+                                continue;
+                            }
+                            let new_idx = before;
+                            let mut new_imports = Vec::new();
+                            for item in &self.files[new_idx].file.items {
+                                if let Item::Import {
+                                    path: ip, alias, ..
+                                } = item
+                                {
+                                    new_imports.push((ip.clone(), alias.clone()));
+                                }
+                            }
+                            for (nip, na) in new_imports {
+                                queue.push((new_idx, nip, na));
+                            }
+                        }
+                    }
+                }
+                ResolvedImport::Native(name) => {
+                    self.imports.entry((req_pkg, bind)).or_insert(name);
+                }
+                ResolvedImport::Missing => {
+                    // Lenient fallback: the historical basename rule, so
+                    // partially-fetched workspaces behave as before.
+                    self.imports
+                        .entry((req_pkg, bind))
+                        .or_insert_with(|| import_target(&ipath));
+                }
+            }
+        }
+    }
     /// Replace an open file's buffer (unsaved editor contents) and
     /// re-index the workspace. Returns diagnostics for the new buffer;
     /// the old index is kept when the buffer does not lex at all.
     pub fn update_file(&mut self, path: &Path, src: String) -> Vec<slang_syntax::ParseError> {
-        let (toks, _) = match lex_with_comments(&src) {
+        let (toks, comments) = match lex_with_comments(&src) {
             Ok(v) => v,
             Err(e) => {
                 return vec![slang_syntax::ParseError {
@@ -191,38 +319,24 @@ impl Db {
                 let fd = &mut self.files[id.0];
                 fd.src = src;
                 fd.file = file;
+                fd.docs = attach_docs(&comments, &fd.file);
             }
             None => {
                 let package = package_of_path(path);
                 let fid = FileId(self.files.len());
                 self.file_index.insert(path.to_path_buf(), fid);
+                let docs = attach_docs(&comments, &file);
                 self.files.push(FileData {
                     path: path.to_path_buf(),
                     package,
                     src,
                     file,
+                    docs,
                 });
             }
         }
         self.rebuild();
         errors
-    }
-
-    /// Record a file's `import` bindings before indexing so aliases
-    /// resolve: `import "a/b"` binds `b`, `import "x" as y` binds `y`.
-    fn record_imports(&mut self, fd: &FileData) {
-        for item in &fd.file.items {
-            if let Item::Import {
-                path: ip, alias, ..
-            } = item
-            {
-                let target = import_target(ip);
-                let bind = alias.clone().unwrap_or_else(|| target.clone());
-                self.imports
-                    .entry((fd.package.clone(), bind))
-                    .or_insert(target);
-            }
-        }
     }
 
     fn rebuild(&mut self) {
@@ -233,14 +347,21 @@ impl Db {
         self.consts.clear();
         let snapshot = self.files.clone();
         for fd in &snapshot {
-            let docs = lex_with_comments(&fd.src)
-                .map(|(_, comments)| attach_docs(&comments, &fd.file))
-                .unwrap_or_default();
-            self.record_imports(fd);
-            self.index_file_symbols(fd, &docs);
+            self.index_file_symbols(fd, &fd.docs);
         }
+        // New imports may have appeared in edited buffers: follow them.
+        self.resolve_all_imports();
     }
     pub fn load_single(package: &str, path: &Path, src: &str) -> Result<Self, String> {
+        // Single-file mode still resolves the file's own imports (stdlib,
+        // cache pins) so hover works outside a loaded workspace.
+        let root = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .and_then(slang_project::find_root)
+            .unwrap_or_else(|| path.parent().map(|d| d.to_path_buf()).unwrap_or_default());
+        let project = slang_project::load(&root).ok();
+        let stdlib = find_stdlib();
         let mut db = Db {
             files: Vec::new(),
             file_index: HashMap::new(),
@@ -250,6 +371,9 @@ impl Db {
             imports: HashMap::new(),
             consts: HashMap::new(),
             file_errors: HashMap::new(),
+            root,
+            project,
+            stdlib,
         };
         let (toks, comments) = lex_with_comments(src).map_err(|e| e.to_string())?;
         let (file, errors) = parse(toks);
@@ -262,23 +386,13 @@ impl Db {
             package: package.to_string(),
             src: src.to_string(),
             file,
+            docs,
         };
-        for item in &fd.file.items {
-            if let Item::Import {
-                path: ip, alias, ..
-            } = item
-            {
-                let target = import_target(ip);
-                let bind = alias.clone().unwrap_or_else(|| target.clone());
-                db.imports
-                    .entry((fd.package.clone(), bind))
-                    .or_insert(target);
-            }
-        }
-        db.index_file_symbols(&fd, &docs);
+        db.index_file_symbols(&fd, &fd.docs);
         let fid = FileId(db.files.len());
         db.file_index.insert(path.to_path_buf(), fid);
         db.files.push(fd);
+        db.resolve_all_imports();
         Ok(db)
     }
 
@@ -427,6 +541,10 @@ impl Db {
     }
 
     /// Parse errors recorded for a file at load time, if any.
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
     pub fn file_errors(&self, path: &Path) -> &[slang_syntax::ParseError] {
         self.file_errors.get(path).map(Vec::as_slice).unwrap_or(&[])
     }
@@ -670,7 +788,7 @@ fn const_hover(c: &ConstSym) -> Hover {
 /// True for compiler-provided packages (`time`, `net`, `json`, ...),
 /// mirroring NATIVE_PKGS in slang's loader.c. Their functions have no
 /// source files; signatures come from the generated NatSig table.
-fn is_native_package(name: &str) -> bool {
+pub(crate) fn is_native_package(name: &str) -> bool {
     native_sigs_generated::NATIVE_SIGS
         .iter()
         .any(|s| s.pkg == name)
@@ -786,7 +904,7 @@ fn package_of_path(file: &Path) -> String {
     sanitize_package(&base)
 }
 
-fn sanitize_package(base: &str) -> String {
+pub(crate) fn sanitize_package(base: &str) -> String {
     let mut out: String = base
         .chars()
         .map(|c| {
@@ -1739,5 +1857,111 @@ mod native_tests {
         let off = src2.find("json.nope").unwrap() + 5;
         assert!(d2.hover(&PathBuf::from("m.sl"), off).is_none());
         let _ = (d, path);
+    }
+}
+
+#[cfg(test)]
+mod resolve_db_tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp(suffix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "slanganalyser-db-test-{}-{suffix}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    /// Full project: local lib, excluded dir, stdlib source, and a pinned
+    /// cache package that itself imports a relative subpackage.
+    /// NOTE: sets SLANG_CACHE/SLANG_STDLIB for the process; no other test
+    /// resolves pins or stdlib paths, so this cannot change their outcome.
+    #[test]
+    fn should_load_pins_stdlib_and_excludes() {
+        let root = tmp("proj");
+        let hash = "cd".repeat(32);
+        // Fake package cache OUTSIDE the project root (like the real
+        // SLANG_CACHE): phase 1 must never sweep it up directly.
+        let cachedir = tmp("cache");
+        let extdir = cachedir
+            .join("pkg")
+            .join("ext")
+            .join(format!("sha256:{hash}"));
+        write(
+            &extdir.join("ext.sl"),
+            "import \"sub\";\nfn greet() -> str {\n    return sub.hello();\n}\n",
+        );
+        write(
+            &extdir.join("sub").join("sub.sl"),
+            "pub fn hello() -> str {\n    return \"hi\";\n}\n",
+        );
+        std::env::set_var("SLANG_CACHE", &cachedir);
+        // Fake stdlib root.
+        let stdlib = root.join("stdlib");
+        write(
+            &stdlib.join("pg").join("pg.sl"),
+            "pub fn query(sql: str) -> int {\n    return 1;\n}\n",
+        );
+        std::env::set_var("SLANG_STDLIB", &stdlib);
+        // Workspace with an excluded dir and a local lib.
+        write(
+            &root.join("slang.project"),
+            "name app\nversion 0.1.0\nexclude skipme\npkg ext git https://x/y tag v0.1.0\n",
+        );
+        write(
+            &root.join("slang.lock"),
+            &format!("ext sha256:{hash} git https://x/y tag v0.1.0\n"),
+        );
+        write(
+            &root.join("main.sl"),
+            "import \"lib\";\nimport \"ext\";\nimport \"pg\";\nfn run() -> str {\n    return ext.greet();\n}\n",
+        );
+        write(
+            &root.join("lib").join("lib.sl"),
+            "pub fn echo(n: int) -> str {\n    return \"e\";\n}\n",
+        );
+        write(
+            &root.join("skipme").join("skip.sl"),
+            "pub fn skipped() -> int {\n    return 0;\n}\n",
+        );
+
+        let db = Db::load(&root).unwrap();
+        assert!(db
+            .funcs
+            .contains_key(&("ext".to_string(), "greet".to_string())));
+        assert!(db
+            .funcs
+            .contains_key(&("sub".to_string(), "hello".to_string())));
+        assert!(db
+            .funcs
+            .contains_key(&("pg".to_string(), "query".to_string())));
+        assert!(db
+            .funcs
+            .contains_key(&("lib".to_string(), "echo".to_string())));
+        assert!(!db
+            .funcs
+            .contains_key(&("skipme".to_string(), "skipped".to_string())));
+        // Hover through the pin into the cache.
+        let main = root.join("main.sl");
+        let src = fs::read_to_string(&main).unwrap();
+        let off = src.find("ext.greet").unwrap() + 4;
+        let h = db.hover(&main, off).unwrap();
+        assert!(h.ty.contains("fn greet"), "got {}", h.ty);
+        assert!(h.location.unwrap().file.ends_with("ext.sl"));
+
+        std::env::remove_var("SLANG_CACHE");
+        std::env::remove_var("SLANG_STDLIB");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cachedir);
     }
 }
