@@ -258,11 +258,13 @@ impl LanguageServer for Backend {
         if !h.docs.is_empty() {
             value.push_str(&format!("\n\n{}", h.docs));
         }
-        value.push_str(&format!(
-            "\n\ndefined at `{}`:{}",
-            h.location.file.display(),
-            h.location.line
-        ));
+        if let Some(loc) = &h.location {
+            value.push_str(&format!(
+                "\n\ndefined at `{}`:{}",
+                loc.file.display(),
+                loc.line
+            ));
+        }
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
