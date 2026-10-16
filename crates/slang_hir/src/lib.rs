@@ -15,6 +15,9 @@ use slang_syntax::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+mod native_sigs_generated;
+use native_sigs_generated::native_sig;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileId(usize);
 
@@ -88,7 +91,9 @@ pub struct Hover {
     pub symbol: String,
     pub ty: String,
     pub docs: String,
-    pub location: Location,
+    /// Definition site. `None` for compiler-provided items (native
+    /// package functions) that have no source file to jump to.
+    pub location: Option<Location>,
 }
 
 pub struct Db {
@@ -159,19 +164,7 @@ impl Db {
             };
             let fid = FileId(db.files.len());
             db.file_index.insert(path.clone(), fid);
-            // Record imports before indexing symbols so aliases resolve.
-            for item in &fd.file.items {
-                if let Item::Import {
-                    path: ip, alias, ..
-                } = item
-                {
-                    let target = import_target(ip);
-                    let bind = alias.clone().unwrap_or_else(|| target.clone());
-                    db.imports
-                        .entry((fd.package.clone(), bind))
-                        .or_insert(target);
-                }
-            }
+            db.record_imports(&fd);
             db.index_file_symbols(&fd, &docs);
             db.files.push(fd);
         }
@@ -215,6 +208,23 @@ impl Db {
         errors
     }
 
+    /// Record a file's `import` bindings before indexing so aliases
+    /// resolve: `import "a/b"` binds `b`, `import "x" as y` binds `y`.
+    fn record_imports(&mut self, fd: &FileData) {
+        for item in &fd.file.items {
+            if let Item::Import {
+                path: ip, alias, ..
+            } = item
+            {
+                let target = import_target(ip);
+                let bind = alias.clone().unwrap_or_else(|| target.clone());
+                self.imports
+                    .entry((fd.package.clone(), bind))
+                    .or_insert(target);
+            }
+        }
+    }
+
     fn rebuild(&mut self) {
         self.funcs.clear();
         self.structs.clear();
@@ -226,18 +236,7 @@ impl Db {
             let docs = lex_with_comments(&fd.src)
                 .map(|(_, comments)| attach_docs(&comments, &fd.file))
                 .unwrap_or_default();
-            for item in &fd.file.items {
-                if let Item::Import {
-                    path: ip, alias, ..
-                } = item
-                {
-                    let target = import_target(ip);
-                    let bind = alias.clone().unwrap_or_else(|| target.clone());
-                    self.imports
-                        .entry((fd.package.clone(), bind))
-                        .or_insert(target);
-                }
-            }
+            self.record_imports(fd);
             self.index_file_symbols(fd, &docs);
         }
     }
@@ -264,6 +263,18 @@ impl Db {
             src: src.to_string(),
             file,
         };
+        for item in &fd.file.items {
+            if let Item::Import {
+                path: ip, alias, ..
+            } = item
+            {
+                let target = import_target(ip);
+                let bind = alias.clone().unwrap_or_else(|| target.clone());
+                db.imports
+                    .entry((fd.package.clone(), bind))
+                    .or_insert(target);
+            }
+        }
         db.index_file_symbols(&fd, &docs);
         let fid = FileId(db.files.len());
         db.file_index.insert(path.to_path_buf(), fid);
@@ -412,7 +423,7 @@ impl Db {
 
     /// Goto-definition at a byte offset.
     pub fn goto_def(&self, path: &Path, offset: usize) -> Option<Location> {
-        self.hover(path, offset).map(|h| h.location)
+        self.hover(path, offset).and_then(|h| h.location)
     }
 
     /// Parse errors recorded for a file at load time, if any.
@@ -483,10 +494,10 @@ impl Db {
                     symbol: ident.to_string(),
                     ty,
                     docs: String::new(),
-                    location: Location {
+                    location: Some(Location {
                         file: path.to_path_buf(),
                         line,
-                    },
+                    }),
                 });
             }
             if let Some(c) = self.consts.get(&(package.to_string(), ident.to_string())) {
@@ -525,6 +536,12 @@ impl Db {
                 if let Some(s) = self.structs.get(&(target.clone(), rest.to_string())) {
                     return Some(struct_hover(s));
                 }
+                // Compiler-provided package: signatures, no jump target.
+                if is_native_package(target) {
+                    if let Some(h) = native_hover(target, rest) {
+                        return Some(h);
+                    }
+                }
             }
             // `Type.Variant` enum reference.
             if let Some(s) = self.structs.get(&(package.to_string(), head.to_string())) {
@@ -533,10 +550,10 @@ impl Db {
                         symbol: ident.to_string(),
                         ty: head.to_string(),
                         docs: s.docs.clone(),
-                        location: Location {
+                        location: Some(Location {
                             file: s.file.clone(),
                             line: s.line,
-                        },
+                        }),
                     });
                 }
             }
@@ -588,10 +605,10 @@ impl Db {
                         symbol: parts.join("."),
                         ty: sig,
                         docs: m.docs.clone(),
-                        location: Location {
+                        location: Some(Location {
                             file: m.file.clone(),
                             line: m.line,
-                        },
+                        }),
                     });
                 }
             }
@@ -633,7 +650,7 @@ impl Db {
             symbol: parts.join("."),
             ty: cur_ty,
             docs: String::new(),
-            location: loc,
+            location: Some(loc),
         })
     }
 }
@@ -643,11 +660,36 @@ fn const_hover(c: &ConstSym) -> Hover {
         symbol: c.name.clone(),
         ty: format!("let {}: {}", c.name, c.ty),
         docs: c.docs.clone(),
-        location: Location {
+        location: Some(Location {
             file: c.file.clone(),
             line: c.line,
-        },
+        }),
     }
+}
+
+/// True for compiler-provided packages (`time`, `net`, `json`, ...),
+/// mirroring NATIVE_PKGS in slang's loader.c. Their functions have no
+/// source files; signatures come from the generated NatSig table.
+fn is_native_package(name: &str) -> bool {
+    native_sigs_generated::NATIVE_SIGS
+        .iter()
+        .any(|s| s.pkg == name)
+}
+
+/// Hover for a native-package function: signature exactly as
+/// `slangc doc` renders it (`fn sleep(int)`), with no jump target.
+fn native_hover(pkg: &str, name: &str) -> Option<Hover> {
+    let sig = native_sig(pkg, name)?;
+    let mut ty = format!("fn {}({})", name, sig.params.join(", "));
+    if let Some(ret) = sig.ret {
+        ty.push_str(&format!(" -> {ret}"));
+    }
+    Some(Hover {
+        symbol: format!("{pkg}.{name}"),
+        ty,
+        docs: String::new(),
+        location: None,
+    })
 }
 
 fn func_hover(f: &FuncSym) -> Hover {
@@ -665,10 +707,10 @@ fn func_hover(f: &FuncSym) -> Hover {
         symbol: f.name.clone(),
         ty: sig,
         docs: f.docs.clone(),
-        location: Location {
+        location: Some(Location {
             file: f.file.clone(),
             line: f.line,
-        },
+        }),
     }
 }
 
@@ -677,10 +719,10 @@ fn struct_hover(s: &StructSym) -> Hover {
         symbol: s.name.clone(),
         ty: format!("struct {}", s.name),
         docs: s.docs.clone(),
-        location: Location {
+        location: Some(Location {
             file: s.file.clone(),
             line: s.line,
-        },
+        }),
     }
 }
 
@@ -1148,6 +1190,18 @@ impl Db {
                         if let Some(r) = self.func_return(target, rest) {
                             return r;
                         }
+                        // ... including compiler-provided packages, whose
+                        // return types come from the NatSig table.
+                        // (`json.decode` is generic over the annotated
+                        // target type, which inference can't see here.)
+                        if is_native_package(target) {
+                            if target == "json" && rest == "decode" {
+                                return "{unknown}".to_string();
+                            }
+                            if let Some(sig) = native_sig(target, rest) {
+                                return sig.ret.unwrap_or("()").to_string();
+                            }
+                        }
                     }
                     // ... else a method on a receiver value: `p.sum()`
                     // keeps its dotted-call shape, so resolve it here.
@@ -1503,7 +1557,7 @@ mod tests {
         let h = d.hover(&PathBuf::from("main.sl"), off).unwrap();
         assert!(h.ty.contains("fn add"));
         assert_eq!(h.docs, "Add two.");
-        assert_eq!(h.location.line, 2);
+        assert_eq!(h.location.unwrap().line, 2);
     }
 
     #[test]
@@ -1641,5 +1695,49 @@ fn mongo_command_locked(c: Conn, database: str, body: Document, deadline: until)
         assert!(h.ty.contains("fn b"), "got {}", h.ty);
         let _ = d;
         let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const SRC: &str = "import \"json\";\nimport \"time\";\nfn f() {\n    let t = time.wall();\n    let s = json.encode(t);\n}\n";
+
+    fn db() -> (Db, PathBuf) {
+        let path = PathBuf::from("main.sl");
+        let d = Db::load_single("main", &path, SRC).unwrap();
+        (d, path)
+    }
+
+    #[test]
+    fn should_hover_native_fn() {
+        let (d, path) = db();
+        let off = SRC.find("time.wall").unwrap() + 6;
+        let h = d.hover(&path, off).unwrap();
+        assert_eq!(h.ty, "fn wall() -> int");
+        assert!(h.location.is_none());
+    }
+
+    #[test]
+    fn should_infer_native_return() {
+        let (d, path) = db();
+        let off = SRC.find("let t =").unwrap() + 4;
+        let h = d.hover(&path, off).unwrap();
+        assert_eq!(h.ty, "int", "got {}", h.ty);
+        let off2 = SRC.find("let s =").unwrap() + 4;
+        let h2 = d.hover(&path, off2).unwrap();
+        assert_eq!(h2.ty, "str", "got {}", h2.ty);
+    }
+
+    #[test]
+    fn should_reject_unknown_native_fn() {
+        let (d, path) = db();
+        let src2 = "import \"json\";\nfn f() {\n    let s = json.nope(\"x\");\n}\n";
+        let d2 = Db::load_single("main", &PathBuf::from("m.sl"), src2).unwrap();
+        let off = src2.find("json.nope").unwrap() + 5;
+        assert!(d2.hover(&PathBuf::from("m.sl"), off).is_none());
+        let _ = (d, path);
     }
 }
