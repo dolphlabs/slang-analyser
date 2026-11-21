@@ -1,4 +1,6 @@
-use crate::convert::{encode_semantic, line_starts, offset_to_position, position_to_offset};
+use crate::convert::{
+    completion_item, encode_semantic, line_starts, offset_to_position, position_to_offset,
+};
 use slang_hir::Db;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -170,6 +172,10 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..Default::default()
+                }),
                 definition_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
@@ -272,6 +278,44 @@ impl LanguageServer for Backend {
             }),
             range: None,
         }))
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let Some(text) = self.docs.read().await.get(&uri).cloned() else {
+            return Ok(None);
+        };
+        let Some(path) = uri_to_path(&uri) else {
+            return Ok(None);
+        };
+        self.ensure_db(&path).await;
+        let db_guard = self.db.read().await;
+        let owned;
+        let db_ref = match db_guard.as_ref() {
+            Some(db) => db,
+            None => match Db::load_single("main", &path, &text) {
+                Ok(db) => {
+                    owned = db;
+                    &owned
+                }
+                Err(_) => return Ok(None),
+            },
+        };
+        let starts = line_starts(&text);
+        let offset = position_to_offset(&starts, &text, pos.line, pos.character);
+        // The live buffer decides the cursor context; the index may lag
+        // it by a keystroke (or keep the last good version while the
+        // buffer does not lex), which only affects scope, never context.
+        let items: Vec<CompletionItem> = db_ref
+            .completions(&path, &text, offset)
+            .into_iter()
+            .map(completion_item)
+            .collect();
+        Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn goto_definition(

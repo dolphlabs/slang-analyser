@@ -1,6 +1,10 @@
 //! Position math and semantic-token encoding (pure, unit-tested).
 
+use slang_hir::{Completion, CompletionKind};
 use slang_syntax::{Token, TokenKind};
+use tower_lsp::lsp_types::{
+    CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind,
+};
 
 /// Byte offsets where each line starts (line 0 starts at 0).
 pub fn line_starts(src: &str) -> Vec<usize> {
@@ -128,6 +132,38 @@ pub fn encode_semantic(
     out
 }
 
+/// Map an analyser completion onto the LSP wire type. `sort_text` puts
+/// the relevance bucket first so clients keep locals above keywords even
+/// before the user has typed a prefix.
+pub fn completion_item(c: Completion) -> CompletionItem {
+    let kind = match c.kind {
+        CompletionKind::Variable => CompletionItemKind::VARIABLE,
+        CompletionKind::Function => CompletionItemKind::FUNCTION,
+        CompletionKind::Method => CompletionItemKind::METHOD,
+        CompletionKind::Field => CompletionItemKind::FIELD,
+        CompletionKind::Struct => CompletionItemKind::STRUCT,
+        CompletionKind::Enum => CompletionItemKind::ENUM,
+        CompletionKind::EnumMember => CompletionItemKind::ENUM_MEMBER,
+        CompletionKind::Constant => CompletionItemKind::CONSTANT,
+        CompletionKind::Module => CompletionItemKind::MODULE,
+        // Builtin type names are lexer keywords (`int`, `map`, ...).
+        CompletionKind::Keyword | CompletionKind::TypeName => CompletionItemKind::KEYWORD,
+    };
+    CompletionItem {
+        sort_text: Some(format!("{}{}", c.rank, c.label)),
+        label: c.label,
+        kind: Some(kind),
+        detail: (!c.detail.is_empty()).then_some(c.detail),
+        documentation: (!c.docs.is_empty()).then_some(Documentation::MarkupContent(
+            MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: c.docs,
+            },
+        )),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +186,32 @@ mod tests {
         assert_eq!(token_class(TokenKind::Ident, Some("Paid"), false), Some(9));
         assert_eq!(token_class(TokenKind::Ident, Some("sum"), true), Some(8));
         assert_eq!(token_class(TokenKind::Eof, None, false), None);
+    }
+
+    #[test]
+    fn should_map_completion_to_lsp_item() {
+        let item = completion_item(Completion {
+            label: "sum".to_string(),
+            kind: CompletionKind::Method,
+            detail: "fn sum(self: Point) -> int".to_string(),
+            docs: "Sum of both axes.".to_string(),
+            rank: 0,
+        });
+        assert_eq!(item.kind, Some(CompletionItemKind::METHOD));
+        assert_eq!(item.sort_text.as_deref(), Some("0sum"));
+        assert_eq!(item.detail.as_deref(), Some("fn sum(self: Point) -> int"));
+        assert!(matches!(
+            item.documentation,
+            Some(Documentation::MarkupContent(ref m)) if m.value == "Sum of both axes."
+        ));
+        let kw = completion_item(Completion {
+            label: "let".to_string(),
+            kind: CompletionKind::Keyword,
+            detail: String::new(),
+            docs: String::new(),
+            rank: 4,
+        });
+        assert_eq!(kw.detail, None);
+        assert_eq!(kw.documentation, None);
     }
 }

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Code completion: locals and parameters in scope (with inferred types),
+  struct fields and methods after `.` (including `self.` in methods),
+  enum variants after `Type.`, exported members after `pkg.` (native
+  packages included), package items, builtins, and keywords. Nothing is
+  offered inside strings or comments, or where a new name is declared.
+- Hover and goto-definition now see `let`s in nested blocks (`if`, `for`,
+  `while`, `select`, `switch` bodies) and method parameters such as
+  `self`, and show doc comments on `impl` methods.
+- Fix: a self-referential `let` (`let x = x.next;`) no longer crashes the
+  language server with a stack overflow.
 - Imports resolve like the compiler: local dirs, native packages (158
   signatures with hover + return-type inference), stdlib sources, and
   `slang.project` pins from the package cache — so `zokor.*`, `pg.*`,

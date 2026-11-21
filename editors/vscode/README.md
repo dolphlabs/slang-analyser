@@ -6,6 +6,7 @@ Language support for [slang](https://slang.dolphlabs.com) (`.sl`), powered by th
 ## Features
 
 - Hover shows inferred types plus documentation
+- Code completion: locals, fields and methods after `.`, enum variants, imported package members, builtins, keywords
 - Go to definition (functions, structs, methods, enum variants)
 - Diagnostics as you type
 - Format document (`slang_fmt` canonical style)
