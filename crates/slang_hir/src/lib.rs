@@ -16,8 +16,11 @@ use slang_syntax::{
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+mod complete;
 mod native_sigs_generated;
 mod resolve;
+mod scope;
+pub use complete::{Completion, CompletionKind};
 use native_sigs_generated::native_sig;
 use resolve::find_stdlib;
 
@@ -42,6 +45,9 @@ pub struct FuncSym {
     pub params: Vec<(String, String)>,
     pub ret: Option<String>,
     pub docs: String,
+    /// Callable from other packages: `pub`, not `extern`, not a method
+    /// (slangc `core.c` `sig_find_pub`).
+    pub exported: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +58,10 @@ pub struct StructSym {
     pub line: u32,
     pub fields: Vec<(String, String, u32)>,
     pub docs: String,
+    /// Declared `pub`: nameable from other packages.
+    pub exported: bool,
+    /// An `enum` (fields are its variants, with empty types).
+    pub is_enum: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +92,8 @@ pub struct ConstSym {
     pub line: u32,
     pub ty: String,
     pub docs: String,
+    /// `pub let`: readable from other packages.
+    pub exported: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -376,9 +388,12 @@ impl Db {
             stdlib,
         };
         let (toks, comments) = lex_with_comments(src).map_err(|e| e.to_string())?;
+        // Like workspace files, a buffer with parse errors still indexes
+        // from its recovered AST: the editor sends half-typed code on
+        // every keystroke, and completion is asked for exactly then.
         let (file, errors) = parse(toks);
-        if let Some(first) = errors.first() {
-            return Err(first.to_string());
+        if !errors.is_empty() {
+            db.file_errors.insert(path.to_path_buf(), errors);
         }
         let docs = attach_docs(&comments, &file);
         let fd = FileData {
@@ -413,6 +428,7 @@ impl Db {
                             .collect(),
                         ret: f.ret.as_ref().map(type_string),
                         docs: docs.get(&f.span.line).cloned().unwrap_or_default(),
+                        exported: f.pub_ && !f.extern_,
                     };
                     self.funcs
                         .entry((package.to_string(), f.name.clone()))
@@ -430,6 +446,8 @@ impl Db {
                             .map(|f| (f.name.clone(), type_string(&f.ty), f.span.line))
                             .collect(),
                         docs: docs.get(&s.span.line).cloned().unwrap_or_default(),
+                        exported: s.pub_,
+                        is_enum: false,
                     };
                     self.structs
                         .entry((package.to_string(), s.name.clone()))
@@ -449,6 +467,8 @@ impl Db {
                             .map(|v| (v.name.clone(), String::new(), v.span.line))
                             .collect(),
                         docs: docs.get(&e.span.line).cloned().unwrap_or_default(),
+                        exported: e.pub_,
+                        is_enum: true,
                     };
                     self.structs
                         .entry((package.to_string(), e.name.clone()))
@@ -468,6 +488,9 @@ impl Db {
                                 .collect(),
                             ret: m.ret.as_ref().map(type_string),
                             docs: docs.get(&m.span.line).cloned().unwrap_or_default(),
+                            // Methods resolve through the receiver's type,
+                            // never through `pkg.name`.
+                            exported: false,
                         };
                         self.methods
                             .entry((package.clone(), i.type_name.clone(), m.name.clone()))
@@ -475,11 +498,11 @@ impl Db {
                     }
                 }
                 Item::Let {
+                    pub_,
                     name,
                     ty,
                     init,
                     span,
-                    ..
                 } => {
                     // Package-level globals: visible file-wide and, when
                     // `pub`, to importers. Unannotated ones infer.
@@ -494,6 +517,7 @@ impl Db {
                         line: span.line,
                         ty: t,
                         docs: docs.get(&span.line).cloned().unwrap_or_default(),
+                        exported: *pub_,
                     };
                     self.consts
                         .entry((package.clone(), name.clone()))
@@ -966,19 +990,25 @@ fn attach_docs(comments: &[slang_syntax::Comment], file: &File) -> HashMap<u32, 
     out
 }
 
+/// Lines that can carry a doc comment: every item, plus each method
+/// inside an `impl` block (documented like a function).
 fn item_lines(file: &File) -> Vec<u32> {
-    file.items
-        .iter()
-        .map(|i| match i {
+    let mut out = Vec::with_capacity(file.items.len());
+    for i in &file.items {
+        match i {
             Item::Import { span, .. } | Item::Link { span, .. } | Item::Let { span, .. } => {
-                span.line
+                out.push(span.line)
             }
-            Item::Fn(f) => f.span.line,
-            Item::Struct(s) => s.span.line,
-            Item::Impl(i) => i.span.line,
-            Item::Enum(e) => e.span.line,
-        })
-        .collect()
+            Item::Fn(f) => out.push(f.span.line),
+            Item::Struct(s) => out.push(s.span.line),
+            Item::Impl(i) => {
+                out.push(i.span.line);
+                out.extend(i.methods.iter().map(|m| m.span.line));
+            }
+            Item::Enum(e) => out.push(e.span.line),
+        }
+    }
+    out
 }
 
 fn type_string(t: &Type) -> String {
@@ -1020,61 +1050,12 @@ impl Db {
         Some((self.chase(fd, ty, name, offset), line))
     }
 
-    /// Single lookup step without chain-following (see `chase`).
+    /// Single lookup step without chain-following (see `chase`): the
+    /// innermost binding named `name` in scope at `offset`.
     fn local_raw(&self, fd: &FileData, name: &str, offset: usize) -> Option<(String, u32)> {
-        // Top-level lets are visible everywhere in the file.
-        for item in &fd.file.items {
-            match item {
-                Item::Let {
-                    name: n,
-                    ty,
-                    init,
-                    span,
-                    ..
-                } if n == name && span.offset <= offset => {
-                    let ty = ty
-                        .as_ref()
-                        .map(type_string)
-                        .unwrap_or_else(|| self.infer_expr(fd, init, init.span.offset));
-                    return Some((ty, span.line));
-                }
-                Item::Fn(f) if f.span.offset <= offset && offset <= fn_end(f) => {
-                    // Parameters first.
-                    for p in &f.params {
-                        if p.name == name {
-                            return Some((type_string(&p.ty), p.span.line));
-                        }
-                    }
-                    if let Some(body) = &f.body {
-                        if let Some(hit) = self.block_local(fd, body, name, offset) {
-                            return Some(hit);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Main-body statements before the offset.
-        let mut best: Option<(String, u32, usize)> = None;
-        for s in &fd.file.body {
-            if let Stmt::Let {
-                name: n,
-                ty,
-                init,
-                span,
-                ..
-            } = s
-            {
-                if n == name && span.offset <= offset {
-                    let ty = ty
-                        .as_ref()
-                        .map(type_string)
-                        .unwrap_or_else(|| self.infer_expr(fd, init, init.span.offset));
-                    best = Some((ty, span.line, span.offset));
-                }
-            }
-        }
-        best.map(|(t, l, _)| (t, l))
+        let bindings = self.bindings_at(fd, offset, scope::Mode::Lookup);
+        let b = bindings.iter().rev().find(|b| b.name == name)?;
+        Some((self.binding_type(fd, b), b.line))
     }
 
     /// Follow `let`-chains to a concrete type, bounded so odd cycles end.
@@ -1091,112 +1072,6 @@ impl Db {
             }
         }
         cur
-    }
-
-    fn block_local(
-        &self,
-        fd: &FileData,
-        body: &Block,
-        name: &str,
-        offset: usize,
-    ) -> Option<(String, u32)> {
-        let mut best: Option<(String, u32, usize)> = None;
-        for s in &body.stmts {
-            match s {
-                Stmt::Let {
-                    name: n,
-                    ty,
-                    init,
-                    span,
-                    ..
-                } if n == name && span.offset <= offset => {
-                    let ty = ty
-                        .as_ref()
-                        .map(type_string)
-                        .unwrap_or_else(|| self.infer_expr(fd, init, init.span.offset));
-                    best = Some((ty, span.line, span.offset));
-                }
-                Stmt::GuardLet {
-                    name: n,
-                    expr,
-                    err_name,
-                    err_expr,
-                    body,
-                    span,
-                    ..
-                } => {
-                    if n == name && span.offset <= offset {
-                        // `guard let x = opt_or_result`: x is the unwrapped value.
-                        let t = self.infer_expr(fd, expr, expr.span.offset);
-                        let t = self.chase(fd, t, name, offset);
-                        return Some((unwrap_single(&t), span.line));
-                    }
-                    // `else let e = err_of(x)`: e lives in the diverging
-                    // else block and in the header declaring it.
-                    if let (Some(en), Some(ee)) = (err_name, err_expr) {
-                        let end = body.span.offset + body.span.len;
-                        if en == name && span.offset <= offset && offset <= end {
-                            return Some((self.infer_expr(fd, ee, ee.span.offset), span.line));
-                        }
-                    }
-                }
-                Stmt::IfLet {
-                    name: n,
-                    expr,
-                    then,
-                    err_name,
-                    err_expr,
-                    else_,
-                    span,
-                    ..
-                } => {
-                    // The binding is declared in the header (`if/else let`),
-                    // so the header itself counts as in scope, through the
-                    // end of the `then` block.
-                    let then_end = then.span.offset + then.span.len;
-                    if n == name && span.offset <= offset && offset <= then_end {
-                        let t = self.infer_expr(fd, expr, expr.span.offset);
-                        let t = self.chase(fd, t, name, offset);
-                        return Some((unwrap_single(&t), span.line));
-                    }
-                    if let (Some(en), Some(ee), Some(eb)) = (err_name, err_expr, else_) {
-                        let else_end = eb.span.offset + eb.span.len;
-                        if en == name && span.offset <= offset && offset <= else_end {
-                            return Some((self.infer_expr(fd, ee, ee.span.offset), span.line));
-                        }
-                    }
-                }
-                Stmt::ForRange {
-                    name: n,
-                    body: b,
-                    span,
-                    ..
-                } if n == name && span.offset <= offset => {
-                    return Some(("int".to_string(), span.line));
-                }
-                Stmt::ForIn {
-                    name: n,
-                    name2,
-                    iter,
-                    body: b,
-                    span,
-                } if span.offset <= offset => {
-                    if n == name {
-                        let t = self.iter_elem_type(fd, iter, offset);
-                        return Some((t, span.line));
-                    }
-                    if name2.as_deref() == Some(name) {
-                        let it = self.infer_expr(fd, iter, iter.span.offset);
-                        let it = self.chase(fd, it, name, offset);
-                        let t = map_value(&it).unwrap_or_else(|| "str".to_string());
-                        return Some((t, span.line));
-                    }
-                    let _ = b;
-                }
-                _ => {}
-            }
-        }
-        best.map(|(t, l, _)| (t, l))
     }
 
     /// Infer the element type of a `for x in iter` loop for hover labels.
