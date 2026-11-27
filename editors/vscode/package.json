@@ -2,7 +2,7 @@
     "name": "slang-analyser",
     "displayName": "slang-analyser",
     "description": "Language support for slang (.sl): hover types, goto-definition, diagnostics, formatting, semantic highlighting.",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "publisher": "dolphlabs",
     "license": "MIT",
     "homepage": "https://github.com/dolphlabs/slang-analyser",

@@ -515,14 +515,14 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slang_fmt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "slang_syntax",
 ]
 
 [[package]]
 name = "slang_hir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "slang_project",
  "slang_syntax",
@@ -530,15 +530,15 @@ dependencies = [
 
 [[package]]
 name = "slang_project"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "slang_syntax"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "slanganalyser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
